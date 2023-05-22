@@ -11,3 +11,5 @@ out/
 # JetBrains IDES
 .idea/
 cmake-build-*/
+
+**/.idea
