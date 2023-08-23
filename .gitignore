@@ -17,3 +17,5 @@ cmake-build-*/
 # Dependencies from .gitmodules
 core/deps/breakpad/
 core/deps/glslang/
+
+**/.idea
