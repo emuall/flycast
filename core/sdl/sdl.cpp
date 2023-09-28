@@ -254,6 +254,28 @@ void input_sdl_handle()
 				checkRawInput();
 				if (event.key.repeat == 0)
 				{
+					auto is_key_mapped = [](u32 code) -> bool {
+#if defined(_WIN32) && !defined(TARGET_UWP)
+						if (config::UseRawInput)
+						{
+							for (int i = 0; i < GamepadDevice::GetGamepadCount(); i++)
+							{
+								auto gamepad = GamepadDevice::GetGamepad(i);
+								if (dynamic_cast<rawinput::RawKeyboard*>(gamepad.get()) != nullptr)
+								{
+									bool mapped = (gamepad->get_input_mapping()->get_button_id(0, code) != EMU_BTN_NONE);
+									if (mapped) return true;
+								}
+							}
+							return false;
+						}
+						else
+#endif
+						{
+							return (sdl_keyboard->get_input_mapping()->get_button_id(0, code) != EMU_BTN_NONE);
+						}
+					};
+					
 					if (event.type == SDL_KEYDOWN
 							&& ((event.key.keysym.sym == SDLK_RETURN && (event.key.keysym.mod & KMOD_ALT))
 									|| (event.key.keysym.sym == SDLK_F11 && (event.key.keysym.mod & (KMOD_ALT | KMOD_CTRL | KMOD_SHIFT | KMOD_GUI)) == 0)))
@@ -272,7 +294,7 @@ void input_sdl_handle()
 						}
 						window_fullscreen = !window_fullscreen;
 					}
-					else if (event.type == SDL_KEYDOWN && (event.key.keysym.mod & KMOD_LALT) && (event.key.keysym.mod & KMOD_LCTRL))
+					else if (event.type == SDL_KEYDOWN && (event.key.keysym.mod & KMOD_LALT) && (event.key.keysym.mod & KMOD_LCTRL) && !(is_key_mapped(SDL_SCANCODE_LALT) || is_key_mapped(SDL_SCANCODE_LCTRL)) )
 					{
 						captureMouse(!mouseCaptured);
 					}
@@ -382,11 +404,6 @@ void input_sdl_handle()
 						sdl_mouse->setRelPos(event.motion.xrel, event.motion.yrel);
 					else
 						sdl_mouse->setAbsPos(event.motion.x, event.motion.y);
-					sdl_mouse->setButton(Mouse::LEFT_BUTTON, event.motion.state & SDL_BUTTON_LMASK);
-					sdl_mouse->setButton(Mouse::RIGHT_BUTTON, event.motion.state & SDL_BUTTON_RMASK);
-					sdl_mouse->setButton(Mouse::MIDDLE_BUTTON, event.motion.state & SDL_BUTTON_MMASK);
-					sdl_mouse->setButton(Mouse::BUTTON_4, event.motion.state & SDL_BUTTON_X1MASK);
-					sdl_mouse->setButton(Mouse::BUTTON_5, event.motion.state & SDL_BUTTON_X2MASK);
 				}
 				else if (mouseCaptured && gameRunning)
 				{
