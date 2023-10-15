@@ -1360,6 +1360,9 @@ public:
 
 	bool rewrite(host_context_t &context, void *faultAddress) override
 	{
+		if (codeBuffer == nullptr)
+			// init() not called yet
+			return false;
 		void* protStart = codeBuffer->get();
 		size_t protSize = codeBuffer->getFreeSpace();
 		virtmem::jit_set_exec(protStart, protSize, false);
@@ -1369,10 +1372,10 @@ public:
 		bool rc = false;
 		try {
 			rc = compiler.rewriteMemAccess(context);
-			virtmem::jit_set_exec(protStart, protSize, true);
 		} catch (const Xbyak::Error& e) {
 			ERROR_LOG(DYNAREC, "Fatal xbyak error: %s", e.what());
 		}
+		virtmem::jit_set_exec(protStart, protSize, true);
 		return rc;
 	}
 

@@ -276,6 +276,7 @@ void D3DRenderer::RenderFramebuffer(const FramebufferInfo& info)
 	if (!dcfbTexture)
 	{
 		device->CreateTexture(width, height, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &dcfbTexture.get(), 0);
+		dcfbSurface.reset();
 		dcfbTexture->GetSurfaceLevel(0, &dcfbSurface.get());
 	}
 
@@ -440,9 +441,17 @@ void D3DRenderer::setGPState(const PolyParam *gp)
 			//bilinear filtering
 			devCache.SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
 			devCache.SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
-			devCache.SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);		// LINEAR for Trilinear filtering
-			devCache.SetSamplerState(0, D3DSAMP_MAXANISOTROPY, std::min(maxAnisotropy, (int)config::AnisotropicFiltering));
+			if (Type == ListType_Punch_Through) {
+				devCache.SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_POINT);
+				devCache.SetSamplerState(0, D3DSAMP_MAXANISOTROPY, 1);
+			}
+			else {
+				devCache.SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);		// LINEAR for Trilinear filtering
+				devCache.SetSamplerState(0, D3DSAMP_MAXANISOTROPY, std::min(maxAnisotropy, (int)config::AnisotropicFiltering));
+			}
 		}
+		float bias = -1.f;
+		devCache.SetSamplerState(0, D3DSAMP_MIPMAPLODBIAS, *(DWORD *)&bias);
 	}
 
 	// Apparently punch-through polys support blending, or at least some combinations

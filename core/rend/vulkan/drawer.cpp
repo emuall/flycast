@@ -225,7 +225,8 @@ void Drawer::DrawPoly(const vk::CommandBuffer& cmdBuffer, u32 listType, bool sor
 				break;
 			}
 		}
-		descriptorSets.bindPerPolyDescriptorSets(cmdBuffer, poly, index, *GetMainBuffer(0)->buffer, offset, offsets.lightsOffset);
+		descriptorSets.bindPerPolyDescriptorSets(cmdBuffer, poly, index, *GetMainBuffer(0)->buffer, offset, offsets.lightsOffset,
+				listType == ListType_Punch_Through);
 	}
 	cmdBuffer.drawIndexed(count, 1, first, 0, 0);
 }
@@ -378,11 +379,6 @@ bool Drawer::Draw(const Texture *fogTexture, const Texture *paletteTexture)
 	currentScissor = vk::Rect2D();
 
 	vk::CommandBuffer cmdBuffer = BeginRenderPass();
-	if (!pvrrc.isRTT && (FB_R_CTRL.fb_enable == 0 || VO_CONTROL.blank_video == 1))
-	{
-		// Video output disabled
-		return true;
-	}
 
 	setFirstProvokingVertex(pvrrc);
 
