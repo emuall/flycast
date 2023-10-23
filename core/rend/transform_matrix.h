@@ -95,10 +95,6 @@ public:
 		return sidebarWidth;
 	}
 
-	glm::vec2 GetDreamcastViewport() const {
-		return dcViewport;
-	}
-
 	void CalcMatrices(const rend_context *renderingContext, int width = 0, int height = 0)
 	{
 		constexpr int flipY = System == COORD_DIRECTX ? -1 : 1;
@@ -300,6 +296,7 @@ inline static void getVideoShift(float& x, float& y)
 			x = VO_STARTX.HStart - 0xae;
 			break;
 		case 851: // Naomi
+		case 850: // meltyb
 			x = VO_STARTX.HStart - 0xa5; // a0 for 15 kHz
 			break;
 		default:
@@ -322,6 +319,7 @@ inline static void getVideoShift(float& x, float& y)
 			y = VO_STARTY.VStart_field1 - 0x2e;
 			break;
 		case 529: // Naomi 31 kHz
+		case 528: // meltyb
 			y = VO_STARTY.VStart_field1 - 0x24;
 			break;
 		case 536: // Naomi 15 kHz 480i
