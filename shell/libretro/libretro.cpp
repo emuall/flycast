@@ -609,6 +609,9 @@ static bool set_variable_visibility(void)
 	{
 		option_display.visible = lightgunSettingsShown;
 
+		option_display.key = CORE_OPTION_NAME "_lightgun_crosshair_size_scaling";
+		environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+
 		for (unsigned i = 0; i < 4; i++)
 		{
 			char key[256];
@@ -910,6 +913,12 @@ static void update_variables(bool first_startup)
 	}
 	else
 		allow_service_buttons = false;
+
+	var.key = CORE_OPTION_NAME "_lightgun_crosshair_size_scaling";
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+		lightgun_crosshair_size = (float)LIGHTGUN_CROSSHAIR_SIZE * std::stof(var.value) / 100.f;
+	else
+		lightgun_crosshair_size = (float)LIGHTGUN_CROSSHAIR_SIZE;
 
 	char key[256];
 	key[0] = '\0';
@@ -2122,7 +2131,11 @@ bool retro_load_game(const struct retro_game_info *game)
 	if (settings.content.gameId == "INITIAL D"
 			|| settings.content.gameId == "INITIAL D Ver.2"
 			|| settings.content.gameId == "INITIAL D Ver.3"
-			|| settings.content.gameId == "INITIAL D CYCRAFT")
+			|| settings.content.gameId == "INITIAL D CYCRAFT"
+			|| settings.content.gameId == "VIRTUA FIGHTER 4 JAPAN"
+			|| settings.content.gameId == "VF4 EVOLUTION JAPAN"
+			|| settings.content.gameId == "VF4 FINAL TUNED JAPAN"
+			|| card_reader::barcodeAvailable()) // TODO how to input card code?
 		haveCardReader = true;
 	else
 		haveCardReader = false;

@@ -573,8 +573,12 @@ void findGLVersion()
 			glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &gl.max_anisotropy);
 	}
 #endif
-	gl.mesa_nouveau = strstr((const char *)glGetString(GL_VERSION), "Mesa") != nullptr && !strcmp((const char *)glGetString(GL_VENDOR), "nouveau");
+	const char *vendor = (const char *)glGetString(GL_VENDOR);
+	const char *renderer = (const char *)glGetString(GL_RENDERER);
+	gl.mesa_nouveau = !stricmp(vendor, "nouveau")
+			|| (!stricmp(vendor, "Mesa") && !strncmp(renderer, "NV", 2));
 	NOTICE_LOG(RENDERER, "OpenGL%s version %d.%d", gl.is_gles ? " ES" : "", gl.gl_major, gl.gl_minor);
+	NOTICE_LOG(RENDERER, "Vendor '%s' Renderer '%s' Version '%s'", vendor, renderer, glGetString(GL_VERSION));
 	while (glGetError() != GL_NO_ERROR)
 		;
 }
@@ -1401,13 +1405,13 @@ bool OpenGLRenderer::renderFrame(int width, int height)
 		ReadRTTBuffer();
 	else if (config::EmulateFramebuffer)
 		writeFramebufferToVRAM();
-#ifndef LIBRETRO
 	else {
 		gl.ofbo.aspectRatio = getOutputFramebufferAspectRatio();
+#ifndef LIBRETRO
 		gl.ofbo2.ready = false;
 		renderLastFrame();
-	}
 #endif
+	}
 	GlVertexArray::unbind();
 
 	return !is_rtt;
