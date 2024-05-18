@@ -366,13 +366,13 @@ extern Option<int> Cable;		// 0 -> VGA, 1 -> VGA, 2 -> RGB, 3 -> TV Composite
 extern Option<int> Region;		// 0 -> JP, 1 -> USA, 2 -> EU, 3 -> default
 extern Option<int> Broadcast;	// 0 -> NTSC, 1 -> PAL, 2 -> PAL/M, 3 -> PAL/N, 4 -> default
 extern Option<int> Language;	// 0 -> JP, 1 -> EN, 2 -> DE, 3 -> FR, 4 -> SP, 5 -> IT, 6 -> default
-extern Option<bool> ForceWindowsCE;
 extern Option<bool> AutoLoadState;
 extern Option<bool> AutoSaveState;
 extern Option<int, false> SavestateSlot;
 extern Option<bool> ForceFreePlay;
 extern Option<bool, false> FetchBoxart;
 extern Option<bool, false> BoxartDisplayMode;
+extern Option<int, false> UIScaling;
 
 // Sound
 
@@ -412,7 +412,11 @@ extern Option<bool> VmuSound;
 
 class RendererOption : public Option<RenderType> {
 public:
+#ifdef LIBRETRO
+	RendererOption() : Option<RenderType>("",
+#else
 	RendererOption() : Option<RenderType>("pvr.rend",
+#endif
 #if defined(USE_DX11)
 			RenderType::DirectX11
 #elif defined(USE_DX9)
@@ -469,6 +473,7 @@ extern Option<bool> ThreadedRendering;
 extern Option<bool> DupeFrames;
 extern Option<bool> NativeDepthInterpolation;
 extern Option<bool> EmulateFramebuffer;
+extern Option<bool> FixUpscaleBleedingEdge;
 #ifdef VIDEO_ROUTING
 extern Option<bool, false> VideoRouting;
 extern Option<bool, false> VideoRoutingScale;
@@ -516,6 +521,7 @@ extern Option<bool> GGPOChatTimeoutToggle;
 extern Option<int> GGPOChatTimeout;
 extern Option<bool> NetworkOutput;
 extern Option<int> MultiboardSlaves;
+extern Option<bool> BattleCableEnable;
 
 #ifdef SUPPORT_DISPMANX
 extern Option<bool> DispmanxMaintainAspect;

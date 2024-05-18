@@ -1160,7 +1160,7 @@ static void parseRenderPass(RenderPass& pass, const RenderPass& previousPass, re
 			|| config::RendererType == RenderType::Vulkan_OIT;
 	const bool mergeTranslucent = config::PerStripSorting || perPixel;
 
-	if (config::RenderResolution > 480 && !config::EmulateFramebuffer)
+	if (config::RenderResolution > 480 && !config::EmulateFramebuffer && config::FixUpscaleBleedingEdge)
 	{
 		fix_texture_bleeding(ctx.global_param_op, previousPass.op_count, pass.op_count, ctx);
 		fix_texture_bleeding(ctx.global_param_pt, previousPass.pt_count, pass.pt_count, ctx);
@@ -1220,6 +1220,15 @@ static void ta_parse_vdrc(TA_context* ctx, bool primRestart)
 			} catch (const TAParserException& e) {
 				break;
 			}
+
+		// Disable blending for opaque polys of the first pass
+		if (pass == 0)
+		{
+			for (PolyParam& pp : vd_rc.global_param_op) {
+				pp.tsp.DstInstr = 0;
+				pp.tsp.SrcInstr = 1;
+			}
+		}
 
 		bool empty_pass = vd_rc.global_param_op.size() == (pass == 0 ? 0u : (int)vd_rc.render_passes.back().op_count)
 				&& vd_rc.global_param_pt.size() == (pass == 0 ? 0u : (int)vd_rc.render_passes.back().pt_count)
@@ -1284,6 +1293,14 @@ static void ta_parse_naomi2(TA_context* ctx, bool primRestart)
 	for (RenderPass& pass : ctx->rend.render_passes)
 	{
 		parseRenderPass(pass, previousPass, ctx->rend, primRestart);
+		// Disable blending for opaque polys of the first pass
+		if (&pass == &ctx->rend.render_passes[0])
+		{
+			for (PolyParam& pp : ctx->rend.global_param_op) {
+				pp.tsp.DstInstr = 0;
+				pp.tsp.SrcInstr = 1;
+			}
+		}
 		previousPass = pass;
 	}
 
@@ -1588,8 +1605,9 @@ void FillBGP(TA_context* ctx)
 		vertex_ptr += strip_vs;
 	}
 
-	f32 bg_depth = ISP_BACKGND_D.f;
-	reinterpret_cast<u32&>(bg_depth) &= 0xFFFFFFF0;	// ISP_BACKGND_D has only 28 bits
+	// Apply a negative 1e-6 bias since the background plane is clipping too much
+	// (Fixes Xtreme Sports, Blue Stinger (JP) and many WinCE games using yuv FMV)
+	float bg_depth = std::max(ISP_BACKGND_D.f - 1e-6f, 1e-11f);
 	cv[0].z = bg_depth;
 	cv[1].z = bg_depth;
 	cv[2].z = bg_depth;

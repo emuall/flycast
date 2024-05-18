@@ -33,13 +33,13 @@ Option<int> Cable("Dreamcast.Cable", 3);			// TV Composite
 Option<int> Region("Dreamcast.Region", 1);			// USA
 Option<int> Broadcast("Dreamcast.Broadcast", 0);	// NTSC
 Option<int> Language("Dreamcast.Language", 1);		// English
-Option<bool> ForceWindowsCE("Dreamcast.ForceWindowsCE");
 Option<bool> AutoLoadState("Dreamcast.AutoLoadState");
 Option<bool> AutoSaveState("Dreamcast.AutoSaveState");
 Option<int, false> SavestateSlot("Dreamcast.SavestateSlot");
 Option<bool> ForceFreePlay("ForceFreePlay", true);
 Option<bool, false> FetchBoxart("FetchBoxart", true);
 Option<bool, false> BoxartDisplayMode("BoxartDisplayMode", true);
+Option<int, false> UIScaling("UIScaling", 100);
 
 // Sound
 
@@ -107,6 +107,7 @@ Option<bool> DupeFrames("rend.DupeFrames", false);
 Option<int> PerPixelLayers("rend.PerPixelLayers", 32);
 Option<bool> NativeDepthInterpolation("rend.NativeDepthInterpolation", false);
 Option<bool> EmulateFramebuffer("rend.EmulateFramebuffer", false);
+Option<bool> FixUpscaleBleedingEdge("rend.FixUpscaleBleedingEdge", true);
 #ifdef VIDEO_ROUTING
 Option<bool, false> VideoRouting("rend.VideoRouting", false);
 Option<bool, false> VideoRoutingScale("rend.VideoRoutingScale", false);
@@ -154,6 +155,7 @@ Option<bool> GGPOChatTimeoutToggle("GGPOChatTimeoutToggle", true, "network");
 Option<int> GGPOChatTimeout("GGPOChatTimeout", 10, "network");
 Option<bool> NetworkOutput("NetworkOutput", false, "network");
 Option<int> MultiboardSlaves("MultiboardSlaves", 1, "network");
+Option<bool> BattleCableEnable("BattleCable", false, "network");
 
 #ifdef SUPPORT_DISPMANX
 Option<bool> DispmanxMaintainAspect("maintain_aspect", true, "dispmanx");

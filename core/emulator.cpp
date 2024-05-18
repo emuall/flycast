@@ -30,7 +30,7 @@
 #include "hw/sh4/sh4_sched.h"
 #include "hw/flashrom/nvmem.h"
 #include "cheats.h"
-#include "oslib/audiostream.h"
+#include "audio/audiostream.h"
 #include "debug/gdb_server.h"
 #include "hw/pvr/Renderer_if.h"
 #include "hw/arm7/arm7_rec.h"
@@ -43,27 +43,18 @@
 #include "hw/pvr/pvr.h"
 #include "profiler/fc_profiler.h"
 #include "oslib/storage.h"
+#include "wsi/context.h"
 #include <chrono>
 
 settings_t settings;
-constexpr float WINCE_DEPTH_SCALE = 0.01f;
 
 static void loadSpecialSettings()
 {
 	std::string& prod_id = settings.content.gameId;
 	NOTICE_LOG(BOOT, "Game ID is [%s]", prod_id.c_str());
 
-	settings.input.lightgunGame = false;
-
 	if (settings.platform.isConsole())
 	{
-		if (ip_meta.isWindowsCE() || prod_id == "T26702N") // PBA Tour Bowling 2001
-		{
-			INFO_LOG(BOOT, "Enabling Extra depth scaling for Windows CE game");
-			config::ExtraDepthScale.override(WINCE_DEPTH_SCALE);
-			config::ForceWindowsCE.override(true);
-		}
-
 		// Tony Hawk's Pro Skater 2
 		if (prod_id == "T13008D 05" || prod_id == "T13006N"
 				// Tony Hawk's Pro Skater 1
@@ -158,24 +149,16 @@ static void loadSpecialSettings()
 		if (prod_id == "MK-51182")
 		{
 			INFO_LOG(BOOT, "Enabling Extra depth scaling for game %s", prod_id.c_str());
-			config::ExtraDepthScale.override(1000000.f);	// Mali needs 1M, 10K is enough for others
+			config::ExtraDepthScale.override(1e8f);
 		}
-		// Re-Volt (US, EU)
-		else if (prod_id == "T-8109N" || prod_id == "T8107D  50")
+		// Re-Volt (US, EU, JP)
+		else if (prod_id == "T-8109N" || prod_id == "T8107D  50" || prod_id == "T-8101M")
 		{
 			INFO_LOG(BOOT, "Enabling Extra depth scaling for game %s", prod_id.c_str());
 			config::ExtraDepthScale.override(100.f);
 		}
-		// Samurai Shodown 6 dc port
-		else if (prod_id == "T0002M")
-		{
-			INFO_LOG(BOOT, "Enabling Extra depth scaling for game %s", prod_id.c_str());
-			config::ExtraDepthScale.override(1e26f);
-		}
 		// Test Drive V-Rally
-		else if (prod_id == "T15110N" || prod_id == "T15105D 50"
-				// Caesars Palace 2000
-				|| prod_id == "T-12504N" || prod_id == "12502D-50")
+		else if (prod_id == "T15110N" || prod_id == "T15105D 50")
 		{
 			INFO_LOG(BOOT, "Enabling Extra depth scaling for game %s", prod_id.c_str());
 			config::ExtraDepthScale.override(0.1f);
@@ -185,12 +168,6 @@ static void loadSpecialSettings()
 		{
 			INFO_LOG(BOOT, "Enabling Extra depth scaling for game %s", prod_id.c_str());
 			config::ExtraDepthScale.override(1000.f);
-		}
-		// Re-Volt (JP)
-		else if (prod_id == "T-8101M")
-		{
-			INFO_LOG(BOOT, "Enabling Extra depth scaling for game %s", prod_id.c_str());
-			config::ExtraDepthScale.override(100.f);
 		}
 
 		std::string areas(ip_meta.area_symbols, sizeof(ip_meta.area_symbols));
@@ -269,7 +246,8 @@ static void loadSpecialSettings()
 			config::UseReios.override(false);
 		}
 		else if (prod_id == "T17708N"	// Stupid Invaders (US)
-			|| prod_id == "T17711D")	// Stupid Invaders (EU)
+			|| prod_id == "T17711D"		// Stupid Invaders (EU)
+			|| prod_id == "T46509M")	// Suika (JP)
 		{
 			NOTICE_LOG(BOOT, "Forcing HLE BIOS");
 			config::UseReios.override(true);
@@ -277,12 +255,17 @@ static void loadSpecialSettings()
 		if (prod_id == "T-9707N"		// San Francisco Rush 2049 (US)
 			|| prod_id == "MK-51146"	// Sega Smash Pack - Volume 1
 			|| prod_id == "T-9702D-50"	// Hydro Thunder (PAL)
-			|| prod_id == "T41601N")	// Elemental Gimmick Gear (US)
+			|| prod_id == "T41601N"		// Elemental Gimmick Gear (US)
+			|| prod_id == "T-8116N"		// South Park Rally (US)
+			|| prod_id == "T1206N")		// JoJo's Bizarre Adventure (US)
 		{
 			NOTICE_LOG(BOOT, "Forcing NTSC broadcasting");
 			config::Broadcast.override(0);
 		}
-		else if (prod_id == "T-9709D-50")	// San Francisco Rush 2049 (EU)
+		else if (prod_id == "T-9709D-50"	// San Francisco Rush 2049 (EU)
+			|| prod_id == "T-8112D-50"		// South Park Rally (EU)
+			|| prod_id == "T7014D  50"		// Super Runabout (EU)
+			|| prod_id == "T10001D 50")		// MTV Sport - Skateboarding (PAL)
 		{
 			NOTICE_LOG(BOOT, "Forcing PAL broadcasting");
 			config::Broadcast.override(1);
@@ -305,18 +288,15 @@ static void loadSpecialSettings()
 	}
 	else if (settings.platform.isArcade())
 	{
-		if (prod_id == "SAMURAI SPIRITS 6")
-		{
-			INFO_LOG(BOOT, "Enabling Extra depth scaling for game %s", prod_id.c_str());
-			config::ExtraDepthScale.override(1e26f);
-		}
 		if (prod_id == "COSMIC SMASH IN JAPAN")
 		{
 			INFO_LOG(BOOT, "Enabling translucent depth multipass for game %s", prod_id.c_str());
 			config::TranslucentPolygonDepthMask.override(true);
 		}
 		if (prod_id == "BEACH SPIKERS JAPAN"
-				|| prod_id == "CHOCO MARKER")
+				|| prod_id == "CHOCO MARKER"
+				|| prod_id == "LOVE AND BERRY USA VER1.003"		// lovebero
+				|| prod_id == "LOVE AND BERRY USA VER2.000")	// lovebery
 		{
 			INFO_LOG(BOOT, "Enabling RTT Copy to VRAM for game %s", prod_id.c_str());
 			config::RenderToTextureBuffer.override(true);
@@ -325,126 +305,6 @@ static void loadSpecialSettings()
 		{
 			INFO_LOG(BOOT, "Disabling Free Play for game %s", prod_id.c_str());
 			config::ForceFreePlay.override(false);
-		}
-		// Input configuration
-		settings.input.JammaSetup = JVS::Default;
-		if (prod_id == "DYNAMIC GOLF"
-				|| prod_id == "SHOOTOUT POOL"
-				|| prod_id == "SHOOTOUT POOL MEDAL"
-				|| prod_id == "CRACKIN'DJ  ver JAPAN"
-				|| prod_id == "CRACKIN'DJ PART2  ver JAPAN"
-				|| prod_id == "KICK '4' CASH"
-				|| prod_id == "DRIVE")			// Waiwai drive
-		{
-			INFO_LOG(BOOT, "Enabling JVS rotary encoders for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::RotaryEncoders;
-		}
-		else if (prod_id == "POWER STONE 2 JAPAN"		// Naomi
-				|| prod_id == "GUILTY GEAR isuka"		// AW
-				|| prod_id == "Dirty Pigskin Football") // AW
-		{
-			INFO_LOG(BOOT, "Enabling 4-player setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::FourPlayers;
-		}
-		else if (prod_id == "SEGA MARINE FISHING JAPAN"
-					|| prod_id == "BASS FISHING SIMULATOR VER.A")	// AW
-		{
-			INFO_LOG(BOOT, "Enabling specific JVS setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::SegaMarineFishing;
-		}
-		else if (prod_id == "RINGOUT 4X4 JAPAN"
-					|| prod_id == "VIRTUA ATHLETE"
-					|| prod_id == "ROYAL RUMBLE"
-					|| prod_id == "BEACH SPIKERS JAPAN"
-					|| prod_id == "MJ JAPAN")
-		{
-			INFO_LOG(BOOT, "Enabling specific JVS setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::DualIOBoards4P;
-		}
-		else if (prod_id == "NINJA ASSAULT"
-					|| prod_id == "Sports Shooting USA"	// AW
-					|| prod_id == "SEGA CLAY CHALLENGE"	// AW
-					|| prod_id == "RANGER MISSION"		// AW
-					|| prod_id == "EXTREME HUNTING"		// AW
-					|| prod_id == "Fixed BOOT strapper")// Extreme hunting 2 (AW)
-		{
-			INFO_LOG(BOOT, "Enabling lightgun setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::LightGun;
-			settings.input.lightgunGame = true;
-		}
-		else if (prod_id == "MAZAN")
-		{
-			INFO_LOG(BOOT, "Enabling specific JVS setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::Mazan;
-			settings.input.lightgunGame = true;
-		}
-		else if (prod_id == " BIOHAZARD  GUN SURVIVOR2")
-		{
-			INFO_LOG(BOOT, "Enabling specific JVS setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::GunSurvivor;
-		}
-		else if (prod_id == "WORLD KICKS")
-		{
-			INFO_LOG(BOOT, "Enabling specific JVS setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::WorldKicks;
-		}
-		else if (prod_id == "WORLD KICKS PCB")
-		{
-			INFO_LOG(BOOT, "Enabling specific JVS setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::WorldKicksPCB;
-		}
-		else if (prod_id == "THE TYPING OF THE DEAD"
-				|| prod_id == " LUPIN THE THIRD  -THE TYPING-"
-				|| prod_id == "------La Keyboardxyu------")
-		{
-			INFO_LOG(BOOT, "Enabling keyboard for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::Keyboard;
-		}
-		else if (prod_id == "OUTTRIGGER     JAPAN")
-		{
-			INFO_LOG(BOOT, "Enabling JVS rotary encoders for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::OutTrigger;
-		}
-		else if (prod_id == "THE MAZE OF THE KINGS"
-				|| prod_id == " CONFIDENTIAL MISSION ---------"
-				|| prod_id == "DEATH CRIMSON OX"
-				|| prod_id.substr(0, 5) == "hotd2"	// House of the Dead 2
-				|| prod_id == "LUPIN THE THIRD  -THE SHOOTING-")
-		{
-			INFO_LOG(BOOT, "Enabling lightgun as analog setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::LightGunAsAnalog;
-			settings.input.lightgunGame = true;
-		}
-		else if (prod_id == "WAVE RUNNER GP")
-		{
-			INFO_LOG(BOOT, "Enabling specific JVS setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::WaveRunnerGP;
-		}
-		else if (prod_id == "  18WHEELER")
-		{
-			INFO_LOG(BOOT, "Enabling specific JVS setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::_18Wheeler;
-		}
-		else if (prod_id == "F355 CHALLENGE JAPAN")
-		{
-			INFO_LOG(BOOT, "Enabling specific JVS setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::F355;
-		}
-		else if (prod_id == "INU NO OSANPO")	// Dog Walking
-		{
-			INFO_LOG(BOOT, "Enabling specific JVS setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::DogWalking;
-		}
-		else if (prod_id == " TOUCH DE UNOH -------------" || prod_id == " TOUCH DE UNOH 2 -----------")
-		{
-			INFO_LOG(BOOT, "Enabling specific JVS setup for game %s", prod_id.c_str());
-			settings.input.JammaSetup = JVS::TouchDeUno;
-			settings.input.lightgunGame = true;
-		}
-		else if (prod_id == "POKASUKA GHOST (JAPANESE)"	// Manic Panic Ghosts
-				|| prod_id == "TOUCH DE ZUNO (JAPAN)")
-		{
-			settings.input.lightgunGame = true;
 		}
 	}
 }
@@ -528,6 +388,7 @@ void Emulator::init()
 	// Default platform
 	setPlatform(DC_PLATFORM_DREAMCAST);
 
+	libGDR_init();
 	pvr::init();
 	aica::init();
 	mem_Init();
@@ -642,6 +503,7 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 				{
 					// Elf only supported with HLE BIOS
 					nvmem::loadHle();
+					InitDrive("");
 				}
 			}
 
@@ -770,10 +632,11 @@ void Emulator::term()
 		aica::term();
 		pvr::term();
 		mem_Term();
+		libGDR_term();
 
-		addrspace::release();
 		state = Terminated;
 	}
+	addrspace::release();
 }
 
 void Emulator::stop()
@@ -840,8 +703,8 @@ void loadGameSpecificSettings()
 	// Reload per-game settings
 	config::Settings::instance().load(true);
 
-	if (config::ForceWindowsCE && !config::ExtraDepthScale.isReadOnly())
-		config::ExtraDepthScale.override(WINCE_DEPTH_SCALE);
+	if (config::GGPOEnable)
+		config::Sh4Clock.override(200);
 }
 
 void Emulator::step()
@@ -883,8 +746,16 @@ void dc_loadstate(Deserializer& deser)
 void Emulator::setNetworkState(bool online)
 {
 	if (settings.network.online != online)
+	{
+		settings.network.online = online;
 		DEBUG_LOG(NETWORK, "Network state %d", online);
-	settings.network.online = online;
+		if (online && settings.platform.isConsole()
+				&& config::Sh4Clock != 200)
+		{
+			config::Sh4Clock.override(200);
+			sh4_cpu.ResetCache();
+		}
+	}
 	settings.input.fastForwardMode &= !online;
 }
 
@@ -963,6 +834,7 @@ void Emulator::start()
 		Get_Sh4Interpreter(&sh4_cpu);
 		INFO_LOG(DYNAREC, "Using Interpreter");
 	}
+	setupPtyPipe();
 
 	memwatch::protect();
 

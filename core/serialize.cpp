@@ -15,10 +15,7 @@
 #include "hw/naomi/naomi_cart.h"
 #include "hw/bba/bba.h"
 #include "cfg/option.h"
-
-//./core/imgread/common.o
-extern u32 NullDriveDiscType;
-extern u8 q_subchannel[96];
+#include "imgread/common.h"
 
 void dc_serialize(Serializer& ser)
 {
@@ -43,8 +40,7 @@ void dc_serialize(Serializer& ser)
 
 	sh4::serialize2(ser);
 
-	ser << NullDriveDiscType;
-	ser << q_subchannel;
+	libGDR_serialize(ser);
 
 	naomi_Serialize(ser);
 
@@ -82,8 +78,7 @@ static void dc_deserialize_libretro(Deserializer& deser)
 
 	sh4::deserialize2(deser);
 
-	deser >> NullDriveDiscType;
-	deser >> q_subchannel;
+	libGDR_deserialize(deser);
 
 	deser.skip<u32>();	// FLASH_SIZE
 	deser.skip<u32>();	// BBSRAM_SIZE
@@ -141,17 +136,16 @@ void dc_deserialize(Deserializer& deser)
 
 	sh4::deserialize2(deser);
 
-	deser >> NullDriveDiscType;
-	deser >> q_subchannel;
+	libGDR_deserialize(deser);
 
 	naomi_Deserialize(deser);
 
 	deser >> config::Broadcast.get();
-	verify(config::Broadcast <= 4);
+	verify(config::Broadcast >= 0 && config::Broadcast <= 4);
 	deser >> config::Cable.get();
-	verify(config::Cable <= 3);
+	verify(config::Cable >= 0 && config::Cable <= 3);
 	deser >> config::Region.get();
-	verify(config::Region <= 3);
+	verify(config::Region >= 0 && config::Region <= 3);
 
 	naomi_cart_deserialize(deser);
 	gd_hle_state.Deserialize(deser);
