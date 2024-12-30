@@ -23,7 +23,7 @@
 
 void OITPipelineManager::CreatePipeline(u32 listType, bool autosort, const PolyParam& pp, Pass pass, int gpuPalette)
 {
-	vk::PipelineVertexInputStateCreateInfo pipelineVertexInputStateCreateInfo = GetMainVertexInputStateCreateInfo();
+	vk::PipelineVertexInputStateCreateInfo pipelineVertexInputStateCreateInfo = GetMainVertexInputStateCreateInfo(true, pp.isNaomi2());
 
 	// Input assembly state
 	vk::PipelineInputAssemblyStateCreateInfo pipelineInputAssemblyStateCreateInfo(vk::PipelineInputAssemblyStateCreateFlags(),
@@ -49,6 +49,17 @@ void OITPipelineManager::CreatePipeline(u32 listType, bool autosort, const PolyP
 	  0.0f,                                         // depthBiasSlopeFactor
 	  1.0f                                          // lineWidth
 	);
+
+	// Dreamcast uses the last vertex as the provoking vertex, but Vulkan uses the first.
+	// Utilize VK_EXT_provoking_vertex when available to set the provoking vertex to be the
+	// last vertex
+	vk::PipelineRasterizationProvokingVertexStateCreateInfoEXT provokingVertexInfo{};
+	if (GetContext()->hasProvokingVertex())
+	{
+		provokingVertexInfo.provokingVertexMode = vk::ProvokingVertexModeEXT::eLastVertex;
+		pipelineRasterizationStateCreateInfo.pNext = &provokingVertexInfo;
+	}
+
 	vk::PipelineMultisampleStateCreateInfo pipelineMultisampleStateCreateInfo;
 
 	// Depth and stencil
@@ -144,7 +155,7 @@ void OITPipelineManager::CreatePipeline(u32 listType, bool autosort, const PolyP
 	OITShaderManager::FragmentShaderParams params = {};
 	params.alphaTest = listType == ListType_Punch_Through;
 	params.bumpmap = pp.tcw.PixelFmt == PixelBumpMap;
-	params.clamping = pp.tsp.ColorClamp && (pvrrc.fog_clamp_min.full != 0 || pvrrc.fog_clamp_max.full != 0xffffffff);
+	params.clamping = pp.tsp.ColorClamp;
 	params.insideClipTest = (pp.tileclip >> 28) == 3;
 	params.fog = config::Fog ? pp.tsp.FogCtrl : 2;
 	params.gouraud = pp.pcw.Gouraud;
@@ -336,7 +347,7 @@ void OITPipelineManager::CreateClearPipeline()
 	  &pipelineDynamicStateCreateInfo,            // pDynamicState
 	  *pipelineLayout,                            // layout
 	  renderPasses->GetRenderPass(true, true),    // renderPass
-	  2                                           // subpass
+	  1                                           // subpass
 	);
 
 	clearPipeline = GetContext()->GetDevice().createGraphicsPipelineUnique(GetContext()->GetPipelineCache(), graphicsPipelineCreateInfo).value;

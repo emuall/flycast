@@ -41,6 +41,7 @@ void VulkanOverlay::Init(QuadPipeline *pipeline)
 	}
 	xhairDrawer = std::make_unique<QuadDrawer>();
 	xhairDrawer->Init(pipeline);
+	vmuLastChanged.fill({});
 }
 
 void VulkanOverlay::Term()
@@ -81,16 +82,16 @@ void VulkanOverlay::Prepare(vk::CommandBuffer cmdBuffer, bool vmu, bool crosshai
 				}
 				continue;
 			}
-			if (texture != nullptr && !vmu_lcd_changed[i])
+			if (texture != nullptr && ::vmuLastChanged[i] == this->vmuLastChanged[i])
 				continue;
 
 			if (texture)
 				texture->deferDeleteResource(VulkanContext::Instance());
 			texture = createTexture(cmdBuffer, 48, 32, (u8*)vmu_lcd_data[i]);
 #ifdef VK_DEBUG
-			VulkanContext::Instance()->setObjectName((VkImageView)texture->GetImageView(), vk::ImageView::objectType, "VMU " + std::to_string(i));
+			VulkanContext::Instance()->setObjectName(texture->GetImageView(), "VMU " + std::to_string(i));
 #endif
-			vmu_lcd_changed[i] = false;
+			this->vmuLastChanged[i] = ::vmuLastChanged[i];
 		}
 	}
 	if (crosshair && !xhairTexture)
@@ -211,19 +212,16 @@ void VulkanOverlay::Draw(vk::CommandBuffer commandBuffer, vk::Extent2D viewport,
 			drawers[i]->Draw(commandBuffer, vmuTextures[i]->GetImageView(), vtx, true, color);
 		}
 	}
-	if (crosshair && crosshairsNeeded())
+	if (crosshair)
 	{
 		pipeline->BindPipeline(commandBuffer);
 		bool imageViewBound = false;
 		for (size_t i = 0; i < config::CrosshairColor.size(); i++)
 		{
-			if (config::CrosshairColor[i] == 0)
-				continue;
-			if (settings.platform.isConsole() && config::MapleMainDevices[i] != MDT_LightGun)
+			if (!crosshairNeeded(i))
 				continue;
 
 			auto [x, y] = getCrosshairPosition(i);
-
 #ifdef LIBRETRO
 			float w = lightgun_crosshair_size * scaling / config::ScreenStretching * 100.f;
 			float h = lightgun_crosshair_size * scaling;

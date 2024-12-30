@@ -95,8 +95,8 @@ public:
 			u32 polyParamsOffset, u32 polyParamsSize, vk::ImageView stencilImageView, vk::ImageView depthImageView,
 			vk::ImageView paletteImageView, OITBuffers *oitBuffers)
 	{
-		if (!perFrameDescSet)
-			perFrameDescSet = perFrameAlloc.alloc();
+		perFrameDescSet = perFrameAlloc.alloc();
+		perPolyDescSets.clear();
 
 		std::vector<vk::DescriptorBufferInfo> bufferInfos;
 		bufferInfos.emplace_back(buffer, vertexUniformOffset, sizeof(VertexShaderUniforms));
@@ -144,8 +144,7 @@ public:
 
 	void updateColorInputDescSet(int index, vk::ImageView colorImageView)
 	{
-		if (!colorInputDescSets[index])
-			colorInputDescSets[index] = colorInputAlloc.alloc();
+		colorInputDescSets[index] = colorInputAlloc.alloc();
 
 		vk::DescriptorImageInfo colorImageInfo(vk::Sampler(), colorImageView, vk::ImageLayout::eShaderReadOnlyOptimal);
 		vk::WriteDescriptorSet writeDescriptorSet(colorInputDescSets[index], 0, 0, vk::DescriptorType::eInputAttachment, colorImageInfo);
@@ -418,7 +417,7 @@ private:
 		return ((int)mode << 2) | cullMode | ((u32)naomi2 << 5) | ((u32)(!settings.platform.isNaomi2() && config::NativeDepthInterpolation) << 6);
 	}
 
-	vk::PipelineVertexInputStateCreateInfo GetMainVertexInputStateCreateInfo(bool full = true) const
+	vk::PipelineVertexInputStateCreateInfo GetMainVertexInputStateCreateInfo(bool full = true, bool naomi2 = false) const
 	{
 		// Vertex input state
 		static const vk::VertexInputBindingDescription vertexBindingDescriptions[] =
@@ -428,11 +427,11 @@ private:
 		static const vk::VertexInputAttributeDescription vertexInputAttributeDescriptions[] =
 		{
 				vk::VertexInputAttributeDescription(0, 0, vk::Format::eR32G32B32Sfloat, offsetof(Vertex, x)),	// pos
-				vk::VertexInputAttributeDescription(1, 0, vk::Format::eR8G8B8A8Uint, offsetof(Vertex, col)),	// base color
-				vk::VertexInputAttributeDescription(2, 0, vk::Format::eR8G8B8A8Uint, offsetof(Vertex, spc)),	// offset color
+				vk::VertexInputAttributeDescription(1, 0, vk::Format::eR8G8B8A8Unorm, offsetof(Vertex, col)),	// base color
+				vk::VertexInputAttributeDescription(2, 0, vk::Format::eR8G8B8A8Unorm, offsetof(Vertex, spc)),	// offset color
 				vk::VertexInputAttributeDescription(3, 0, vk::Format::eR32G32Sfloat, offsetof(Vertex, u)),		// tex coord
-				vk::VertexInputAttributeDescription(4, 0, vk::Format::eR8G8B8A8Uint, offsetof(Vertex, col1)),	// base1 color
-				vk::VertexInputAttributeDescription(5, 0, vk::Format::eR8G8B8A8Uint, offsetof(Vertex, spc1)),	// offset1 color
+				vk::VertexInputAttributeDescription(4, 0, vk::Format::eR8G8B8A8Unorm, offsetof(Vertex, col1)),	// base1 color
+				vk::VertexInputAttributeDescription(5, 0, vk::Format::eR8G8B8A8Unorm, offsetof(Vertex, spc1)),	// offset1 color
 				vk::VertexInputAttributeDescription(6, 0, vk::Format::eR32G32Sfloat, offsetof(Vertex, u1)),		// tex1 coord
 				vk::VertexInputAttributeDescription(7, 0, vk::Format::eR32G32B32Sfloat, offsetof(Vertex, nx)),	// naomi2 normal
 		};
@@ -440,12 +439,29 @@ private:
 		{
 				vk::VertexInputAttributeDescription(0, 0, vk::Format::eR32G32B32Sfloat, offsetof(Vertex, x)),	// pos
 		};
+
+		const vk::VertexInputAttributeDescription* attributeDescription = vertexInputLightAttributeDescriptions;
+		u32 attributeDescriptionSize = std::size(vertexInputLightAttributeDescriptions);
+
+		if (full)
+		{
+			attributeDescription = vertexInputAttributeDescriptions;
+
+			if (naomi2)
+			{
+				attributeDescriptionSize = std::size(vertexInputAttributeDescriptions);
+			}
+			else
+			{
+				// naomi2 normal not needed
+				attributeDescriptionSize = std::size(vertexInputAttributeDescriptions) - 1;
+			}
+		}
 		return vk::PipelineVertexInputStateCreateInfo(
-				vk::PipelineVertexInputStateCreateFlags(),
-				std::size(vertexBindingDescriptions),
-				vertexBindingDescriptions,
-				full ? std::size(vertexInputAttributeDescriptions) : std::size(vertexInputLightAttributeDescriptions),
-				full ? vertexInputAttributeDescriptions : vertexInputLightAttributeDescriptions);
+			vk::PipelineVertexInputStateCreateFlags(),
+			std::size(vertexBindingDescriptions), vertexBindingDescriptions,
+			attributeDescriptionSize, attributeDescription
+		);
 	}
 
 	void CreatePipeline(u32 listType, bool autosort, const PolyParam& pp, Pass pass, int gpuPalette);

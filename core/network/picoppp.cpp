@@ -26,9 +26,6 @@
 #include "stdclass.h"
 
 //#define BBA_PCAPNG_DUMP
-#ifdef BBA_PCAPNG_DUMP
-#include "oslib/oslib.h"
-#endif
 
 #ifdef __MINGW32__
 #define _POSIX_SOURCE
@@ -51,6 +48,7 @@ extern "C" {
 #include "miniupnp.h"
 #include "cfg/option.h"
 #include "emulator.h"
+#include "oslib/oslib.h"
 
 #include <map>
 #include <mutex>
@@ -188,11 +186,29 @@ static GamePortList GamesPorts[] = {
 		{ "MK-51037", "HDR-0106" },
 		{ 12079, 20675 },
 	},
+	{ // Dee Dee Planet
+		{ "HDR-0041" },
+		{ 9879 },
+	},
+	{ // Driving Strikers online demo
+		{ "IND-161053" },
+		{ 30099 },
+	},
+	{ // Floigan Bros
+		{ "MK-51114" },
+		{},
+		{ 37001 },
+	},
+	{ // Internet Game Pack
+		{ "MK-51138" },
+		{ 5656 },
+		{ 5011, 10500, 10501, 10502, 10503 },
+	},
 	{ // NBA 2K1,2K2 / NFL 2K1,2K2 / NCAA 2K2
-		{ "MK-51063", "HDR-0150",					// NBA 2K1
-		  "MK-51178", "HDR-0197", "MK-5117850",   // NBA 2K2
-		  "MK-51062", "HDR-0144",					// NFL 2K1
-		  "MK-51168", "HDR-0196",					// NFL 2K2
+		{ "MK-51063", "HDR-0150",				// NBA 2K1
+		  "MK-51178", "HDR-0197", "MK-5117850",	// NBA 2K2
+		  "MK-51062", "HDR-0144",				// NFL 2K1
+		  "MK-51168", "HDR-0196",				// NFL 2K2
 		  "MK-51176" },							// NCAA 2K2
 		{ 5502, 5503, 5656 },
 		{ 5011, 6666 },
@@ -217,6 +233,14 @@ static GamePortList GamesPorts[] = {
 		{ 7648, 1285, 1028 },
 		{ },
 	},
+	{
+		{
+			"HDR-0073"				// Sega Tetris
+			"GENERIC", "T44501M"	// Golf Shiyouyo 2
+									// (the dreamcastlive patched versions are id'ed as GENERIC)
+		},
+		{ 20675, 12079 },
+	},
 	{ // StarLancer
 		{ "T40209N", "T17723D 05" },
 		{ 2300, 6500, 47624 }, // FIXME 2300-2400 ?
@@ -231,10 +255,6 @@ static GamePortList GamesPorts[] = {
 		{ "T22904N", "T7016D  50" },
 		{ },
 		{ 17219 },
-	},
-	{ // Driving Strikers online demo
-		{ "IND-161053" },
-		{ 30099 },
 	},
 
 	{ // Atomiswave
@@ -740,51 +760,57 @@ static int modem_set_speed(pico_device *dev, uint32_t speed)
     return 0;
 }
 
+static uint32_t dns_query_start;
+static uint32_t dns_query_attempts;
+
+static void reset_dns_entries()
+{
+	dns_query_attempts = 0;
+	dns_query_start = 0;
+	public_ip.addr = 0;
+	afo_ip.addr = 0;
+}
+
 static void check_dns_entries()
 {
-    static uint32_t dns_query_start = 0;
-    static uint32_t dns_query_attempts = 0;
-
 	if (public_ip.addr == 0)
 	{
-		if (!dns_query_start)
+		u32 ip;
+		pico_string_to_ipv4(RESOLVER1_OPENDNS_COM, &ip);
+		pico_ip4 tmpdns { ip };
+		if (dns_query_start == 0)
 		{
 			dns_query_start = PICO_TIME_MS();
-			struct pico_ip4 tmpdns;
-			pico_string_to_ipv4(RESOLVER1_OPENDNS_COM, &tmpdns.addr);
 			get_host_by_name("myip.opendns.com", tmpdns);
+		}
+		else if (get_dns_answer(&public_ip, tmpdns) == 0)
+		{
+			dns_query_attempts = 0;
+			dns_query_start = 0;
+			char myip[16];
+			pico_ipv4_to_string(myip, public_ip.addr);
+			INFO_LOG(MODEM, "My IP is %s", myip);
 		}
 		else
 		{
-			struct pico_ip4 tmpdns;
-			pico_string_to_ipv4(RESOLVER1_OPENDNS_COM, &tmpdns.addr);
-			if (get_dns_answer(&public_ip, tmpdns) == 0)
+			if (PICO_TIME_MS() - dns_query_start > 1000)
 			{
-				dns_query_attempts = 0;
-				dns_query_start = 0;
-				char myip[16];
-				pico_ipv4_to_string(myip, public_ip.addr);
-				INFO_LOG(MODEM, "My IP is %s", myip);
-			}
-			else
-			{
-				if (PICO_TIME_MS() - dns_query_start > 1000)
+				if (++dns_query_attempts >= 5)
 				{
-					if (++dns_query_attempts >= 5)
-					{
-						public_ip.addr = 0xffffffff;	// Bogus but not null
-						dns_query_attempts = 0;
-					}
-					else
-						// Retry
-						dns_query_start = 0;
+					public_ip.addr = 0xffffffff;	// Bogus but not null
+					dns_query_attempts = 0;
+					dns_query_start = 0;
+					WARN_LOG(MODEM, "Can't resolve my IP");
 				}
+				else
+					// Retry
+					dns_query_start = 0;
 			}
 		}
 	}
 	else if (afo_ip.addr == 0)
 	{
-		if (!dns_query_start)
+		if (dns_query_start == 0)
 		{
 			dns_query_start = PICO_TIME_MS();
 			get_host_by_name("auriga.segasoft.com", dnsaddr);	// Alien Front Online server
@@ -809,6 +835,7 @@ static void check_dns_entries()
 						pico_string_to_ipv4("146.185.135.179", &addr);	// Default address
 						memcpy(&afo_ip.addr, &addr, sizeof(addr));
 						dns_query_attempts = 0;
+						WARN_LOG(MODEM, "Can't resolve auriga.segasoft.com. Using default 146.185.135.179");
 					}
 					else
 						// Retry
@@ -882,7 +909,7 @@ static void dumpFrame(const u8 *frame, u32 size)
 	fwrite(&roundedSize, sizeof(roundedSize), 1, pcapngDump);
 	u32 ifId = 0;
 	fwrite(&ifId, sizeof(ifId), 1, pcapngDump);
-	u64 now = (u64)(os_GetSeconds() * 1000000.0);
+	u64 now = getTimeMs() * 1000;
 	fwrite((u32 *)&now + 1, 4, 1, pcapngDump);
 	fwrite(&now, 4, 1, pcapngDump);
 	fwrite(&size, sizeof(size), 1, pcapngDump);
@@ -951,6 +978,7 @@ static void *pico_thread_func(void *)
 	std::future<MiniUPnP> upnp =
 		std::async(std::launch::async, [ports]() {
 			// Initialize miniupnpc and map network ports
+			ThreadName _("UPNP-init");
 			MiniUPnP upnp;
 			if (ports != nullptr && config::EnableUPnP)
 			{
@@ -982,12 +1010,33 @@ static void *pico_thread_func(void *)
 		out_buffer_lock.unlock();
     }
 
-	u32 addr;
-	pico_string_to_ipv4(config::DNS.get().c_str(), &addr);
-	memcpy(&dnsaddr.addr, &addr, sizeof(addr));
+    // Find DNS ip address
+	{
+		std::string dnsName = config::DNS;
+		if (dnsName == "46.101.91.123")
+			// override legacy default with current one
+			dnsName = "dns.flyca.st";
+		hostent *hp = gethostbyname(dnsName.c_str());
+		if (hp != nullptr && hp->h_length > 0)
+		{
+			memcpy(&dnsaddr.addr, hp->h_addr_list[0], sizeof(dnsaddr.addr));
+			char s[17];
+			pico_ipv4_to_string(s, dnsaddr.addr);
+			NOTICE_LOG(MODEM, "%s IP is %s", dnsName.c_str(), s);
+		}
+		else
+		{
+			u32 addr;
+			pico_string_to_ipv4("46.101.91.123", &addr);
+			dnsaddr.addr = addr;
+			WARN_LOG(MODEM, "Can't resolve dns.flyca.st. Using default 46.101.91.123");
+		}
+	}
+	reset_dns_entries();
 
 	// Create ppp/eth device
 	const bool usingPPP = !config::EmulateBBA;
+	u32 addr;
 	if (usingPPP)
 	{
 		// PPP
@@ -1145,7 +1194,7 @@ static void *pico_thread_func(void *)
 	return NULL;
 }
 
-static cThread pico_thread(pico_thread_func, NULL);
+static cThread pico_thread(pico_thread_func, nullptr, "PicoTCP");
 
 bool start_pico()
 {

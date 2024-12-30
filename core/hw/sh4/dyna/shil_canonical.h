@@ -34,6 +34,7 @@
 	#define shil_cf_arg_u32(x) sh4Dynarec->canonParam(op, &op->x, CPT_u32);
 	#define shil_cf_arg_f32(x) sh4Dynarec->canonParam(op, &op->x, CPT_f32);
 	#define shil_cf_arg_ptr(x) sh4Dynarec->canonParam(op, &op->x, CPT_ptr);
+	#define shil_cf_arg_sh4ctx() sh4Dynarec->canonParam(op, nullptr, CPT_sh4ctx);
 	#define shil_cf_rv_u32(x) sh4Dynarec->canonParam(op, &op->x, CPT_u32rv);
 	#define shil_cf_rv_f32(x) sh4Dynarec->canonParam(op, &op->x, CPT_f32rv);
 	#define shil_cf_rv_u64(x) sh4Dynarec->canonParam(op, &op->rd, CPT_u64rvL); sh4Dynarec->canonParam(op, &op->rd2, CPT_u64rvH);
@@ -135,6 +136,28 @@ shil_compile( \
 	die("This opcode requires native dynarec implementation"); \
 )
 
+#if SHIL_MODE==1
+
+template<int Stride = 1>
+static inline float innerProduct(const float *f1, const float *f2)
+{
+#if HOST_CPU == CPU_X86 || HOST_CPU == CPU_X64 || HOST_CPU == CPU_ARM64
+	const double f = (double)f1[0] * f2[Stride * 0]
+				   + (double)f1[1] * f2[Stride * 1]
+				   + (double)f1[2] * f2[Stride * 2]
+				   + (double)f1[3] * f2[Stride * 3];
+	return fixNaN((float)f);
+#else
+	const float f = f1[0] * f2[Stride * 0]
+				  + f1[1] * f2[Stride * 1]
+				  + f1[2] * f2[Stride * 2]
+				  + f1[3] * f2[Stride * 3];
+	return fixNaN(f);
+#endif
+}
+
+#endif
+
 #else
 
 #define BIN_OP_I(z)
@@ -205,11 +228,12 @@ shil_opc_end()
 shil_opc(sync_fpscr)
 shil_canonical
 (
-void, f1, (),
-	UpdateFPSCR();
+void, f1, (Sh4Context *ctx),
+	Sh4Context::UpdateFPSCR(ctx);
 )
 shil_compile
 (
+	shil_cf_arg_sh4ctx();
 	shil_cf(f1);
 )
 shil_opc_end()
@@ -404,24 +428,6 @@ shil_canonical
 (
 u32,f1,(u32 r1),
 	return (r1 & 0xFFFF0000) | ((r1&0xFF)<<8) | ((r1>>8)&0xFF);
-)
-
-shil_compile
-(
-	shil_cf_arg_u32(rs1);
-	shil_cf(f1);
-	shil_cf_rv_u32(rd);
-)
-
-shil_opc_end()
-
-
-//shop_swap -- swap all bytes in word
-shil_opc(swap)
-shil_canonical
-(
-u32,f1,(u32 r1),
-	return (r1 >>24) | ((r1 >>16)&0xFF00) |((r1&0xFF00)<<8) | (r1<<24);
 )
 
 shil_compile
@@ -656,7 +662,8 @@ shil_opc_end()
 shil_opc(div1)
 shil_canonical
 (
-u64,f1,(u32 a, s32 b, u32 T),
+u64,f1,(u32 a, s32 b, u32 T, Sh4Context *ctx),
+	sr_t& sr = ctx->sr;
 	bool qxm = sr.Q ^ sr.M;
 	sr.Q = (int)a < 0;
 	a = (a << 1) | T;
@@ -670,6 +677,7 @@ u64,f1,(u32 a, s32 b, u32 T),
 )
 shil_compile
 (
+	shil_cf_arg_sh4ctx();
 	shil_cf_arg_u32(rs3);
 	shil_cf_arg_u32(rs2);
 	shil_cf_arg_u32(rs1);
@@ -791,27 +799,15 @@ shil_opc_end()
 shil_opc(pref)
 shil_canonical
 (
-void,f1,(u32 r1),
-	if ((r1>>26) == 0x38) do_sqw_mmu(r1);
-)
-
-shil_canonical
-(
-void,f2,(u32 r1),
-	if ((r1>>26) == 0x38) do_sqw_nommu(r1,sq_both);
+void,f1,(u32 r1, Sh4Context *ctx),
+	if ((r1 >> 26) == 0x38) ctx->doSqWrite(r1, ctx);
 )
 
 shil_compile
 (
+	shil_cf_arg_sh4ctx();
 	shil_cf_arg_u32(rs1);
-	if (CCN_MMUCR.AT)
-	{
-		shil_cf(f1);
-	}
-	else
-	{
-		shil_cf(f2);
-	}
+	shil_cf(f1);
 )
 
 shil_opc_end()
@@ -909,31 +905,12 @@ shil_opc_end()
 //shop_fipr
 shil_opc(fipr)
 
-#if HOST_CPU == CPU_X86 || HOST_CPU == CPU_X64
 shil_canonical
 (
 f32,f1,(const float* fn, const float* fm),
 
-	double idp = (double)fn[0] * fm[0];
-	idp += (double)fn[1] * fm[1];
-	idp += (double)fn[2] * fm[2];
-	idp += (double)fn[3] * fm[3];
-
-	return fixNaN((float)idp);
+	return innerProduct(fn, fm);
 )
-#else
-shil_canonical
-(
-f32,f1,(float* fn, float* fm),
-
-	float idp = fn[0] * fm[0];
-	idp+=fn[1]*fm[1];
-	idp+=fn[2]*fm[2];
-	idp+=fn[3]*fm[3];
-
-	return fixNaN(idp);
-)
-#endif
 
 shil_compile
 (
@@ -942,74 +919,24 @@ shil_compile
 	shil_cf(f1);
 	shil_cf_rv_f32(rd);
 )
-
 shil_opc_end()
-
-
 
 //shop_ftrv
 shil_opc(ftrv)
-#if HOST_CPU == CPU_X86 || HOST_CPU == CPU_X64
 shil_canonical
 (
-void,f1,(float* fd, const float* fn, const float* fm),
+void,f1,(float *fd, const float *fn, const float *fm),
 
-	double v1 = (double)fm[0]  * fn[0] +
-				(double)fm[4]  * fn[1] +
-				(double)fm[8]  * fn[2] +
-				(double)fm[12] * fn[3];
-
-	double v2 = (double)fm[1]  * fn[0] +
-				(double)fm[5]  * fn[1] +
-				(double)fm[9]  * fn[2] +
-				(double)fm[13] * fn[3];
-
-	double v3 = (double)fm[2]  * fn[0] +
-				(double)fm[6]  * fn[1] +
-				(double)fm[10] * fn[2] +
-				(double)fm[14] * fn[3];
-
-	double v4 = (double)fm[3]  * fn[0] +
-				(double)fm[7]  * fn[1] +
-				(double)fm[11] * fn[2] +
-				(double)fm[15] * fn[3];
-
-	fd[0] = fixNaN((float)v1);
-	fd[1] = fixNaN((float)v2);
-	fd[2] = fixNaN((float)v3);
-	fd[3] = fixNaN((float)v4);
+	float v1 = innerProduct<4>(fn, fm);
+	float v2 = innerProduct<4>(fn, fm + 1);
+	float v3 = innerProduct<4>(fn, fm + 2);
+	float v4 = innerProduct<4>(fn, fm + 3);
+	fd[0] = v1;
+	fd[1] = v2;
+	fd[2] = v3;
+	fd[3] = v4;
 )
-#else
-shil_canonical
-(
-void,f1,(float* fd,float* fn, float* fm),
 
-	float v1 = fm[0]  * fn[0] +
-			   fm[4]  * fn[1] +
-			   fm[8]  * fn[2] +
-			   fm[12] * fn[3];
-
-	float v2 = fm[1]  * fn[0] +
-			   fm[5]  * fn[1] +
-			   fm[9]  * fn[2] +
-			   fm[13] * fn[3];
-
-	float v3 = fm[2]  * fn[0] +
-			   fm[6]  * fn[1] +
-			   fm[10] * fn[2] +
-			   fm[14] * fn[3];
-
-	float v4 = fm[3]  * fn[0] +
-			   fm[7]  * fn[1] +
-			   fm[11] * fn[2] +
-			   fm[15] * fn[3];
-
-	fd[0] = fixNaN(v1);
-	fd[1] = fixNaN(v2);
-	fd[2] = fixNaN(v3);
-	fd[3] = fixNaN(v4);
-)
-#endif
 shil_compile
 (
 	shil_cf_arg_ptr(rs2);
@@ -1024,7 +951,7 @@ shil_opc(fmac)
 shil_canonical
 (
 f32,f1,(float fn, float f0,float fm),
-	return fixNaN(fn + f0 * fm);
+	return fixNaN(std::fma(f0, fm, fn));
 )
 shil_compile
 (

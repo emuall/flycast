@@ -23,21 +23,22 @@
 
 #include <atomic>
 #include <future>
-#include <map>
+#include <array>
 #include <mutex>
 #include <utility>
 #include <vector>
+#include <time.h>
 
 void loadGameSpecificSettings();
 void SaveSettings();
 
 int flycast_init(int argc, char* argv[]);
-void dc_reset(bool hard); // for tests only
 void flycast_term();
 void dc_exit();
-void dc_savestate(int index = 0);
+void dc_savestate(int index = 0, const u8 *pngData = nullptr, u32 pngSize = 0);
 void dc_loadstate(int index = 0);
-void dc_loadstate(Deserializer& deser);
+time_t dc_getStateCreationDate(int index);
+void dc_getStateScreenshot(int index, std::vector<u8>& pngData);
 
 enum class Event {
 	Start,
@@ -46,6 +47,9 @@ enum class Event {
 	Terminate,
 	LoadState,
 	VBlank,
+	Network,
+	DiskChange,
+	max = DiskChange
 };
 
 class EventManager
@@ -54,26 +58,29 @@ public:
 	using Callback = void (*)(Event, void *);
 
 	static void listen(Event event, Callback callback, void *param = nullptr) {
-		Instance.registerEvent(event, callback, param);
+		instance().registerEvent(event, callback, param);
 	}
 
 	static void unlisten(Event event, Callback callback, void *param = nullptr) {
-		Instance.unregisterEvent(event, callback, param);
+		instance().unregisterEvent(event, callback, param);
 	}
 
 	static void event(Event event) {
-		Instance.broadcastEvent(event);
+		instance().broadcastEvent(event);
 	}
 
 private:
 	EventManager() = default;
+	static EventManager& instance() {
+		static EventManager _instance;
+		return _instance;
+	}
 
 	void registerEvent(Event event, Callback callback, void *param);
 	void unregisterEvent(Event event, Callback callback, void *param);
 	void broadcastEvent(Event event);
 
-	static EventManager Instance;
-	std::map<Event, std::vector<std::pair<Callback, void *>>> callbacks;
+	std::array<std::vector<std::pair<Callback, void *>>, static_cast<size_t>(Event::max) + 1> callbacks;
 };
 
 struct LoadProgress
@@ -88,6 +95,8 @@ struct LoadProgress
 	std::atomic<const char *> label;
 	std::atomic<float> progress;
 };
+
+class Sh4Executor;
 
 class Emulator
 {
@@ -156,10 +165,32 @@ public:
 	 * Called internally on vblank.
 	 */
 	void vblank();
+	/**
+	 * Restart the cpu iff the emu is still running
+	 * Returns true if the cpu was started
+	 */
+	bool restartCpu();
+	/*
+	 * Load the machine state from the passed deserializer
+	 */
+	void loadstate(Deserializer& deser);
+	/**
+	 * Insert a new media in the GD-ROM drive.
+	 */
+	void insertGdrom(const std::string& path);
+	/**
+	 * Open the GD-ROM drive lid.
+	 */
+	void openGdrom();
+
+	Sh4Executor *getSh4Executor();
+
+	void dc_reset(bool hard); // for tests only
 
 private:
 	bool checkStatus(bool wait = false);
 	void runInternal();
+	void diskChange();
 
 	enum State {
 		Uninitialized = 0,
@@ -170,7 +201,7 @@ private:
 		Terminated,
 	};
 	State state = Uninitialized;
-	std::future<void> threadResult;
+	std::shared_future<void> threadResult;
 	bool resetRequested = false;
 	bool singleStep = false;
 	u64 startTime = 0;
@@ -179,6 +210,8 @@ private:
 	u32 stepRangeTo = 0;
 	bool stopRequested = false;
 	std::mutex mutex;
+	Sh4Executor *interpreter = nullptr;
+	Sh4Executor *recompiler = nullptr;
 };
 extern Emulator emu;
 

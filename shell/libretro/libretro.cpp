@@ -27,6 +27,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nswitch.h"
+#elif defined(__linux__) || defined(__FreeBSD__)
+#include <stdlib.h>
 #endif
 
 #include <sys/stat.h>
@@ -49,21 +51,19 @@
 #include "emulator.h"
 #include "hw/sh4/sh4_mem.h"
 #include "hw/sh4/sh4_sched.h"
-#include "hw/sh4/dyna/blockmanager.h"
 #include "keyboard_map.h"
 #include "hw/maple/maple_cfg.h"
 #include "hw/maple/maple_if.h"
-#include "hw/maple/maple_cfg.h"
-#include "hw/pvr/spg.h"
+#include "hw/pvr/pvr_regs.h"
+#include "hw/pvr/Renderer_if.h"
 #include "hw/naomi/naomi_cart.h"
 #include "hw/naomi/card_reader.h"
-#include "imgread/common.h"
 #include "LogManager.h"
 #include "cheats.h"
 #include "rend/osd.h"
 #include "cfg/option.h"
 #include "version.h"
-#include "rend/transform_matrix.h"
+#include "oslib/oslib.h"
 
 constexpr char slash = path_default_slash_c();
 
@@ -75,6 +75,7 @@ constexpr char slash = path_default_slash_c();
 #define RETRO_DEVICE_POPNMUSIC				RETRO_DEVICE_SUBCLASS( RETRO_DEVICE_JOYPAD, 6 )
 #define RETRO_DEVICE_RACING					RETRO_DEVICE_SUBCLASS( RETRO_DEVICE_JOYPAD, 7 )
 #define RETRO_DEVICE_DENSHA					RETRO_DEVICE_SUBCLASS( RETRO_DEVICE_JOYPAD, 8 )
+#define RETRO_DEVICE_FULL_CONTROLLER		RETRO_DEVICE_SUBCLASS( RETRO_DEVICE_JOYPAD, 9 )
 
 #define RETRO_ENVIRONMENT_RETROARCH_START_BLOCK 0x800000
 
@@ -125,6 +126,9 @@ static bool platformIsDreamcast = true;
 static bool platformIsArcade = false;
 static bool threadedRenderingEnabled = true;
 static bool oitEnabled = false;
+#if defined(HAVE_OIT) || defined(HAVE_VULKAN) || defined(HAVE_D3D11)
+static bool perPixelChecked = false;
+#endif
 static bool autoSkipFrameEnabled = false;
 #ifdef _OPENMP
 static bool textureUpscaleEnabled = false;
@@ -193,7 +197,6 @@ static retro_rumble_interface rumble;
 static void refresh_devices(bool first_startup);
 static void init_disk_control_interface();
 static bool read_m3u(const char *file);
-void gui_display_notification(const char *msg, int duration);
 static void updateVibration(u32 port, float power, float inclination, u32 durationMs);
 
 static std::string game_data;
@@ -202,7 +205,7 @@ static char game_dir[1024];
 char game_dir_no_slash[1024];
 char vmu_dir_no_slash[PATH_MAX];
 char content_name[PATH_MAX];
-static char g_roms_dir[PATH_MAX];
+char g_roms_dir[PATH_MAX];
 static std::mutex mtx_serialization;
 static bool gl_ctx_resetting = false;
 static bool is_dupe;
@@ -218,7 +221,6 @@ static std::vector<std::string> disk_paths;
 static std::vector<std::string> disk_labels;
 static bool disc_tray_open = false;
 
-void UpdateInputState();
 static bool set_variable_visibility(void);
 
 void retro_set_video_refresh(retro_video_refresh_t cb)
@@ -292,13 +294,13 @@ void retro_set_environment(retro_environment_t cb)
 			{ "Pop'n Music",		RETRO_DEVICE_POPNMUSIC },
 			{ "Race Controller",	RETRO_DEVICE_RACING },
 			{ "Densha de Go!",		RETRO_DEVICE_DENSHA },
-			{ 0 },
+			{ "Full Controller",	RETRO_DEVICE_FULL_CONTROLLER },
 	};
 	static const struct retro_controller_info ports[] = {
-			{ ports_default,  13 },
-			{ ports_default,  13 },
-			{ ports_default,  13 },
-			{ ports_default,  13 },
+			{ ports_default,  std::size(ports_default) },
+			{ ports_default,  std::size(ports_default) },
+			{ ports_default,  std::size(ports_default) },
+			{ ports_default,  std::size(ports_default) },
 			{ 0 },
 	};
 	environ_cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, (void*)ports);
@@ -348,6 +350,11 @@ void retro_init()
 	if (!addrspace::reserve())
 		ERROR_LOG(VMEM, "Cannot reserve memory space");
 
+#if defined(__linux__) || defined(__FreeBSD__)
+	// SDL evdev keyboard driver installs a SIGSEGV signal handler by default, which replaces flycast's one.
+	// Make sure to avoid this if SDL is initialized after the core (which happens).
+	setenv("SDL_NO_SIGNAL_HANDLERS", "1", 1);
+#endif
 	os_InstallFaultHandler();
 	MapleConfigMap::UpdateVibration = updateVibration;
 
@@ -571,13 +578,15 @@ static bool set_variable_visibility(void)
 					|| config::MapleMainDevices[i] == MDT_LightGun
 					|| config::MapleMainDevices[i] == MDT_TwinStick
 					|| config::MapleMainDevices[i] == MDT_AsciiStick
-					|| config::MapleMainDevices[i] == MDT_RacingController);
+					|| config::MapleMainDevices[i] == MDT_RacingController
+					|| config::MapleMainDevices[i] == MDT_SegaControllerXL);
 
 			snprintf(key, sizeof(key), CORE_OPTION_NAME "_device_port%d_slot1", i + 1);
 			environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
 
-			// Only the regular controller has 2 expansion slots
-			option_display.visible = platformIsDreamcast && config::MapleMainDevices[i] == MDT_SegaController;
+			// Only the regular controller (and the XL version) has 2 expansion slots
+			option_display.visible = platformIsDreamcast
+					&& (config::MapleMainDevices[i] == MDT_SegaController || config::MapleMainDevices[i] == MDT_SegaControllerXL);
 
 			snprintf(key, sizeof(key), CORE_OPTION_NAME "_device_port%d_slot2", i + 1);
 			environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
@@ -944,12 +953,13 @@ static void update_variables(bool first_startup)
 					|| config::MapleMainDevices[i] == MDT_LightGun
 					|| config::MapleMainDevices[i] == MDT_TwinStick
 					|| config::MapleMainDevices[i] == MDT_AsciiStick
-					|| config::MapleMainDevices[i] == MDT_RacingController)
+					|| config::MapleMainDevices[i] == MDT_RacingController
+					|| config::MapleMainDevices[i] == MDT_SegaControllerXL)
 			{
 				for (int slot = 0; slot < 2; slot++)
 				{
 					// Only regular controller has a 2nd slot
-					if (slot == 1 && config::MapleMainDevices[i] != MDT_SegaController)
+					if (slot == 1 && config::MapleMainDevices[i] != MDT_SegaController && config::MapleMainDevices[i] != MDT_SegaControllerXL)
 					{
 						config::MapleExpansionDevices[i][1] = MDT_None;
 						continue;
@@ -1013,7 +1023,7 @@ static void update_variables(bool first_startup)
 										| 0xff000000;
 
 		vmu_lcd_status[i * 2] = false;
-		vmu_lcd_changed[i * 2] = true;
+		vmuLastChanged[i * 2] = getTimeMs();
 		vmu_screen_params[i].vmu_screen_position = UPPER_LEFT;
 		vmu_screen_params[i].vmu_screen_size_mult = 1;
 		vmu_screen_params[i].vmu_pixel_on_R = VMU_SCREEN_COLOR_MAP[VMU_DEFAULT_ON].r;
@@ -1167,7 +1177,7 @@ void retro_run()
 		emu.start();
 
 	poll_cb();
-	UpdateInputState();
+	os_UpdateInputState();
 	bool fastforward = false;
 	if (environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &fastforward))
 		settings.input.fastForwardMode = fastforward;
@@ -1187,7 +1197,7 @@ void retro_run()
 		}
 	} catch (const FlycastException& e) {
 		ERROR_LOG(COMMON, "%s", e.what());
-		gui_display_notification(e.what(), 5000);
+		os_notify(e.what(), 5000);
 		environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, NULL);
 	}
 
@@ -1212,7 +1222,7 @@ static bool loadGame()
 		emu.loadGame(game_data.c_str());
 	} catch (const FlycastException& e) {
 		ERROR_LOG(BOOT, "%s", e.what());
-		gui_display_notification(e.what(), 5000);
+		os_notify(e.what(), 5000);
         retro_unload_game();
 		return false;
 	}
@@ -1241,6 +1251,42 @@ void retro_reset()
 	emu.start();
 }
 
+#if defined(HAVE_OIT) || defined(HAVE_VULKAN) || defined(HAVE_D3D11)
+void check_per_pixel_opt(void)
+{
+	// Check if per-pixel is supported, if not we hide the option
+	if (!GraphicsContext::Instance()->hasPerPixel())
+	{
+		for (unsigned i = 0; option_defs_us[i].key != NULL; i++)
+		{
+			// Looking for the alpha sorting core option...
+			if (!strcmp(option_defs_us[i].key, CORE_OPTION_NAME "_alpha_sorting"))
+			{
+				for (unsigned j = 0; option_defs_us[i].values[j].value != NULL; j++)
+				{
+					// ... then for the per-pixel choice...
+					if (!strcmp(option_defs_us[i].values[j].value, "per-pixel (accurate)"))
+					{
+						// ... null it out...
+						option_defs_us[i].values[j] = { NULL, NULL };
+
+						// ... and finally refresh core options.
+						bool optionCategoriesSupported = false;
+						libretro_set_core_options(environ_cb, &optionCategoriesSupported);
+						categoriesSupported |= optionCategoriesSupported;
+
+						break;
+					}
+				}
+				break;
+			}
+		}
+		NOTICE_LOG(RENDERER, "Current renderer does not support 'Per-Pixel' Alpha Sorting.");
+	}
+	perPixelChecked = true;
+}
+#endif
+
 #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
 static void context_reset()
 {
@@ -1251,6 +1297,10 @@ static void context_reset()
 	rend_term_renderer();
 	theGLContext.init();
 	rend_init_renderer();
+#ifdef HAVE_OIT
+	if (!perPixelChecked)
+		check_per_pixel_opt();
+#endif
 }
 
 static void context_destroy()
@@ -1279,7 +1329,7 @@ static uint32_t map_gamepad_button(unsigned device, unsigned id)
 	{
 			/* JOYPAD_B      */ DC_BTN_A,
 			/* JOYPAD_Y      */ DC_BTN_X,
-			/* JOYPAD_SELECT */ 0,
+			/* JOYPAD_SELECT */ DC_BTN_D,
 			/* JOYPAD_START  */ DC_BTN_START,
 			/* JOYPAD_UP     */ DC_DPAD_UP,
 			/* JOYPAD_DOWN   */ DC_DPAD_DOWN,
@@ -1287,6 +1337,8 @@ static uint32_t map_gamepad_button(unsigned device, unsigned id)
 			/* JOYPAD_RIGHT  */ DC_DPAD_RIGHT,
 			/* JOYPAD_A      */ DC_BTN_B,
 			/* JOYPAD_X      */ DC_BTN_Y,
+			/* JOYPAD_L      */ DC_BTN_C,
+			/* JOYPAD_R      */ DC_BTN_Z,
 	};
 
 	static const uint32_t dc_lg_joymap[] =
@@ -1763,6 +1815,28 @@ static void set_input_descriptors()
 				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START, "Start" };
 				break;
 
+			case MDT_SegaControllerXL:
+				// No DPad2
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,    "D-Pad Up" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,  "D-Pad Down" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT, "D-Pad Right" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,     "A" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,     "B" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,     "Y" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,     "X" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,     "C" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,     "Z" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,"D" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,    "L Trigger" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,    "R Trigger" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START, "Start" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X, "Analog X" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y, "Analog Y" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X, "R. Analog X" };
+				desc[descriptor_index++] = { i, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y, "R. Analog Y" };
+				break;
+
 			default:
 				break;
 			}
@@ -1812,6 +1886,8 @@ static void retro_vk_context_reset()
 	theVulkanContext.init((retro_hw_render_interface_vulkan *)vulkan);
 	rend_term_renderer();
 	rend_init_renderer();
+	if (!perPixelChecked)
+		check_per_pixel_opt();
 }
 
 static void retro_vk_context_destroy()
@@ -1946,6 +2022,8 @@ static void dx11_context_reset()
 	else if (config::RendererType != RenderType::DirectX11_OIT)
 		config::RendererType = RenderType::DirectX11;
 	rend_init_renderer();
+	if (!perPixelChecked)
+		check_per_pixel_opt();
 }
 
 static void dx11_context_destroy()
@@ -1985,7 +2063,7 @@ bool retro_load_game(const struct retro_game_info *game)
 	if (environ_cb(RETRO_ENVIRONMENT_GET_JIT_CAPABLE, &can_jit) && !can_jit) {
 		// jit is required both for performance and for audio. trying to run
 		// without the jit will cause a crash.
-		gui_display_notification("Cannot run without JIT", 5000);
+		os_notify("Cannot run without JIT", 5000);
 		return false;
 	}
 #endif
@@ -2288,7 +2366,7 @@ bool retro_unserialize(const void * data, size_t size)
 
 	try {
 		Deserializer deser(data, size);
-		dc_loadstate(deser);
+		emu.loadstate(deser);
 	    retro_audio_flush_buffer();
 		if (!first_run)
 			emu.start();
@@ -2398,6 +2476,9 @@ void retro_set_controller_port_device(unsigned in_port, unsigned device)
 			case RETRO_DEVICE_DENSHA:
 				config::MapleMainDevices[in_port] = MDT_DenshaDeGoController;
 				break;
+			case RETRO_DEVICE_FULL_CONTROLLER:
+				config::MapleMainDevices[in_port] = MDT_SegaControllerXL;
+				break;
 			default:
 				config::MapleMainDevices[in_port] = MDT_None;
 				break;
@@ -2453,11 +2534,6 @@ void retro_rend_present()
 {
 	if (!config::ThreadedRendering)
 		is_dupe = false;
-}
-
-static uint32_t get_time_ms()
-{
-   return (uint32_t)(os_GetSeconds() * 1000.0);
 }
 
 static void get_analog_stick( retro_input_state_t input_state_cb,
@@ -2916,14 +2992,14 @@ static void UpdateInputState(u32 port)
 	}
 	if (rumble.set_rumble_state != NULL && vib_stop_time[port] > 0)
 	{
-		if (get_time_ms() >= vib_stop_time[port])
+		if (getTimeMs() >= vib_stop_time[port])
 		{
 			vib_stop_time[port] = 0;
 			rumble.set_rumble_state(port, RETRO_RUMBLE_STRONG, 0);
 		}
 		else if (vib_delta[port] > 0.0)
 		{
-			u32 rem_time = vib_stop_time[port] - get_time_ms();
+			u32 rem_time = vib_stop_time[port] - getTimeMs();
 			rumble.set_rumble_state(port, RETRO_RUMBLE_STRONG, 65535 * vib_strength[port] * rem_time * vib_delta[port]);
 		}
 	}
@@ -2933,15 +3009,17 @@ static void UpdateInputState(u32 port)
 	switch (config::MapleMainDevices[port])
 	{
 	case MDT_SegaController:
+	case MDT_SegaControllerXL:
 		{
 			int16_t ret = getBitmask(port, RETRO_DEVICE_JOYPAD);
 
 			// -- buttons
-			for (int id = RETRO_DEVICE_ID_JOYPAD_B; id <= RETRO_DEVICE_ID_JOYPAD_X; ++id)
+			for (int id = RETRO_DEVICE_ID_JOYPAD_B; id <= RETRO_DEVICE_ID_JOYPAD_R; ++id)
 				setDeviceButtonStateFromBitmap(ret, port, RETRO_DEVICE_JOYPAD, id);
 
-			// -- analog stick
-			get_analog_stick( input_cb, port, RETRO_DEVICE_INDEX_ANALOG_LEFT, &(joyx[port]), &(joyy[port]) );
+			// -- analog sticks
+			get_analog_stick(input_cb, port, RETRO_DEVICE_INDEX_ANALOG_LEFT, &joyx[port], &joyy[port]);
+			get_analog_stick(input_cb, port, RETRO_DEVICE_INDEX_ANALOG_RIGHT, &joyrx[port], &joyry[port]);
 
 			// -- triggers
 			if ( digital_triggers )
@@ -3315,7 +3393,7 @@ static void UpdateInputState(u32 port)
 	}
 }
 
-void UpdateInputState()
+void os_UpdateInputState()
 {
 	UpdateInputState(0);
 	UpdateInputState(1);
@@ -3331,7 +3409,7 @@ static void updateVibration(u32 port, float power, float inclination, u32 durati
 	vib_strength[port] = power;
 
 	rumble.set_rumble_state(port, RETRO_RUMBLE_STRONG, (u16)(65535 * power));
-	vib_stop_time[port] = get_time_ms() + durationMs;
+	vib_stop_time[port] = getTimeMs() + durationMs;
 	vib_delta[port] = inclination;
 }
 
@@ -3445,13 +3523,14 @@ static bool retro_set_eject_state(bool ejected)
 	disc_tray_open = ejected;
 	if (ejected)
 	{
-		DiscOpenLid();
+		emu.openGdrom();
 		return true;
 	}
 	else
 	{
 		try {
-			return DiscSwap(disk_paths[disk_index]);
+			emu.insertGdrom(disk_paths[disk_index]);
+			return true;
 		} catch (const FlycastException& e) {
 			ERROR_LOG(GDROM, "%s", e.what());
 			return false;
@@ -3472,19 +3551,19 @@ static unsigned retro_get_image_index()
 static bool retro_set_image_index(unsigned index)
 {
 	disk_index = index;
-	if (disk_index >= disk_paths.size())
-	{
-		// No disk in drive
-		settings.content.path.clear();
-		return true;
-	}
-	settings.content.path = disk_paths[index];
-
-	if (disc_tray_open)
-		return true;
-
 	try {
-		return DiscSwap(settings.content.path);
+		if (disk_index >= disk_paths.size())
+		{
+			// No disk in drive
+			emu.insertGdrom("");
+			return true;
+		}
+
+		if (disc_tray_open)
+			return true;
+
+		emu.insertGdrom(disk_paths[index]);
+		return true;
 	} catch (const FlycastException& e) {
 		ERROR_LOG(GDROM, "%s", e.what());
 		return false;
@@ -3661,12 +3740,10 @@ static bool read_m3u(const char *file)
 	return disk_index != 0;
 }
 
-void gui_display_notification(const char *msg, int duration)
+void os_notify(const char *msg, int durationMs, const char *details)
 {
 	retro_message retromsg;
 	retromsg.msg = msg;
-	retromsg.frames = duration / 17;
+	retromsg.frames = durationMs / 17;
 	environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &retromsg);
 }
-
-void os_RunInstance(int argc, const char *argv[]) { }

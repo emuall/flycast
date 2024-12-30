@@ -16,8 +16,8 @@
 	 You should have received a copy of the GNU General Public License
 	 along with reicast.  If not, see <https://www.gnu.org/licenses/>.
  */
-#include "TexCache.h"
 #include "CustomTexture.h"
+#include "TexCache.h"
 #include "oslib/directory.h"
 #include "oslib/storage.h"
 #include "cfg/option.h"
@@ -107,13 +107,15 @@ bool CustomTexture::Init()
 
 			if (!textures_path.empty())
 			{
-				DIR *dir = flycast::opendir(textures_path.c_str());
-				if (dir != nullptr)
-				{
-					NOTICE_LOG(RENDERER, "Found custom textures directory: %s", textures_path.c_str());
-					custom_textures_available = true;
-					flycast::closedir(dir);
-					loader_thread.Start();
+				try {
+					hostfs::FileInfo fileInfo = hostfs::storage().getFileInfo(textures_path);
+					if (fileInfo.isDirectory)
+					{
+						NOTICE_LOG(RENDERER, "Found custom textures directory: %s", textures_path.c_str());
+						custom_textures_available = true;
+						loader_thread.Start();
+					}
+				} catch (const FlycastException& e) {
 				}
 			}
 		}
@@ -142,7 +144,7 @@ u8* CustomTexture::LoadCustomTexture(u32 hash, int& width, int& height)
 	if (it == texture_map.end())
 		return nullptr;
 
-	FILE *file = nowide::fopen(it->second.c_str(), "rb");
+	FILE *file = hostfs::storage().openFile(it->second, "rb");
 	if (file == nullptr)
 		return nullptr;
 	int n;
@@ -284,7 +286,7 @@ void CustomTexture::DumpTexture(u32 hash, int w, int h, TextureType textype, voi
 		FILE *f = nowide::fopen((const char *)context, "wb");
 		if (f == nullptr)
 		{
-			WARN_LOG(RENDERER, "Dump texture: can't save to file %s: error %d", context, errno);
+			WARN_LOG(RENDERER, "Dump texture: can't save to file %s: error %d", (const char *)context, errno);
 		}
 		else
 		{

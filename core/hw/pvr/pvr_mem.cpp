@@ -190,10 +190,7 @@ void YUV_deserialize(Deserializer& deser)
 	deser >> YUV_y_curr;
 	deser >> YUV_x_size;
 	deser >> YUV_y_size;
-	if (deser.version() >= Deserializer::V16)
-		deser >> YUV_index;
-	else
-		YUV_index = 0;
+	deser >> YUV_index;
 }
 
 void YUV_reset()
@@ -222,10 +219,10 @@ template u32 pvr_read32p<u32>(u32 addr);
 template float pvr_read32p<float>(u32 addr);
 
 //write
-template<typename T>
+template<typename T, bool Internal>
 void DYNACALL pvr_write32p(u32 addr, T data)
 {
-	if constexpr (sizeof(T) == 1)
+	if constexpr (!Internal && sizeof(T) == 1)
 	{
 		INFO_LOG(MEMORY, "%08x: 8-bit VRAM writes are not possible", addr);
 		return;
@@ -237,9 +234,12 @@ void DYNACALL pvr_write32p(u32 addr, T data)
 
 	*(T *)&vram[pvr_map32(addr)] = data;
 }
-template void pvr_write32p<u8>(u32 addr, u8 data);
-template void pvr_write32p<u16>(u32 addr, u16 data);
-template void pvr_write32p<u32>(u32 addr, u32 data);
+template void pvr_write32p<u8, false>(u32 addr, u8 data);
+template void pvr_write32p<u8, true>(u32 addr, u8 data);
+template void pvr_write32p<u16, false>(u32 addr, u16 data);
+template void pvr_write32p<u16, true>(u32 addr, u16 data);
+template void pvr_write32p<u32, false>(u32 addr, u32 data);
+template void pvr_write32p<u32, true>(u32 addr, u32 data);
 
 void DYNACALL TAWrite(u32 address, const SQBuffer *data, u32 count)
 {

@@ -56,22 +56,40 @@ bool atomiswaveForceFeedback;
 
 static bool loadBios(const char *filename, Archive *child_archive, Archive *parent_archive, int region)
 {
+	std::string path;
+	std::string biosName;
+	if (settings.naomi.slave)
+	{
+		// extract basename of bios
+		biosName = get_file_basename(filename);
+		size_t idx = get_last_slash_pos(biosName);
+		if (idx != std::string::npos)
+			biosName = biosName.substr(idx + 1);
+		path = filename;
+	}
+	else
+	{
+		biosName = filename;
+	}
 	int biosid = 0;
 	for (; BIOS[biosid].name != nullptr; biosid++)
-		if (!stricmp(BIOS[biosid].name, filename))
+		if (!stricmp(BIOS[biosid].name, biosName.c_str()))
 			break;
 	if (BIOS[biosid].name == nullptr)
 	{
-		WARN_LOG(NAOMI, "Unknown BIOS %s", filename);
+		WARN_LOG(NAOMI, "Unknown BIOS %s", biosName.c_str());
 		return false;
 	}
 
 	const BIOS_t *bios = &BIOS[biosid];
 
-	std::string arch_name(filename);
-	std::string path = hostfs::findNaomiBios(arch_name + ".zip");
 	if (path.empty())
-		path = hostfs::findNaomiBios(arch_name + ".7z");
+	{
+		std::string arch_name(bios->filename != nullptr ? bios->filename : filename);
+		path = hostfs::findNaomiBios(arch_name + ".zip");
+		if (path.empty())
+			path = hostfs::findNaomiBios(arch_name + ".7z");
+	}
 	DEBUG_LOG(NAOMI, "Loading BIOS from %s", path.c_str());
 	std::unique_ptr<Archive> bios_archive(OpenArchive(path));
 
@@ -81,12 +99,7 @@ static bool loadBios(const char *filename, Archive *child_archive, Archive *pare
 
 	for (int romid = 0; bios->blobs[romid].filename != nullptr; romid++)
 	{
-		if (region == -1)
-		{
-			region = bios->blobs[romid].region;
-			config::Region.override(region);
-		}
-		else if (bios->blobs[romid].region != (u32)region)
+		if (region != -1 && bios->blobs[romid].region != (u32)region)
 			continue;
 
 		std::unique_ptr<ArchiveFile> file;
@@ -119,10 +132,13 @@ static bool loadBios(const char *filename, Archive *child_archive, Archive *pare
 					md5.add(biosData + bios->blobs[romid].offset, bios->blobs[romid].length);
 				DEBUG_LOG(NAOMI, "Mapped %s: %x bytes at %07x", bios->blobs[romid].filename, read, bios->blobs[romid].offset);
 				found_region = true;
+				if (region == -1)
+					config::Region.override(bios->blobs[romid].region);
 			}
 			break;
 		case EepromBE16:
 			{
+				// FIXME memory leak
 				naomi_default_eeprom = (u8 *)malloc(bios->blobs[romid].length);
 				if (naomi_default_eeprom == nullptr)
 					throw NaomiCartException("Memory allocation failed");
@@ -183,9 +199,12 @@ void naomi_cart_LoadBios(const char *filename)
 	std::unique_ptr<Archive> parent_archive;
 	if (game->parent_name != nullptr)
 	{
-		std::string parentPath = hostfs::storage().getParentPath(filename);
-		parentPath = hostfs::storage().getSubPath(parentPath, game->parent_name);
-		parent_archive.reset(OpenArchive(parentPath));
+		try {
+			std::string parentPath = hostfs::storage().getParentPath(filename);
+			parentPath = hostfs::storage().getSubPath(parentPath, game->parent_name);
+			parent_archive.reset(OpenArchive(parentPath));
+		} catch (const FlycastException& e) {
+		}
 	}
 
 	const char *bios = "naomi";
@@ -220,13 +239,16 @@ static void loadMameRom(const std::string& path, const std::string& fileName, Lo
 	std::unique_ptr<Archive> parent_archive;
 	if (game->parent_name != nullptr)
 	{
-		std::string parentPath = hostfs::storage().getParentPath(path);
-		parentPath = hostfs::storage().getSubPath(parentPath, game->parent_name);
-		parent_archive.reset(OpenArchive(parentPath));
+		try {
+			std::string parentPath = hostfs::storage().getParentPath(path);
+			parentPath = hostfs::storage().getSubPath(parentPath, game->parent_name);
+			parent_archive.reset(OpenArchive(parentPath));
+		} catch (const FlycastException& e) {
+		}
 		if (parent_archive != nullptr)
 			INFO_LOG(NAOMI, "Opened %s", game->parent_name);
 		else
-			WARN_LOG(NAOMI, "Parent not found: %s", parentPath.c_str());
+			WARN_LOG(NAOMI, "Parent not found: %s", game->parent_name);
 
 	}
 
@@ -269,7 +291,9 @@ static void loadMameRom(const std::string& path, const std::string& fileName, Lo
 		case GD:
 			{
 				GDCartridge *gdcart;
-				if (strncmp(game->name, "vf4", 3) == 0)
+				if (strncmp(game->name, "vf4", 3) == 0
+						|| strcmp(game->name, "mj1") == 0
+						|| strncmp(game->name, "wccf", 4) == 0)
 					gdcart = new NetDimm(game->size);
 				else
 					gdcart = new GDCartridge(game->size);
@@ -627,8 +651,10 @@ void naomi_cart_LoadRom(const std::string& path, const std::string& fileName, Lo
 		bool systemSP = memcmp(bootId.boardName, "SystemSP", 8) == 0;
 		std::string gameId = trim_trailing_ws(std::string(bootId.gameTitle[systemSP ? 1 : 0], &bootId.gameTitle[systemSP ? 1 : 0][32]));
 		std::string romName;
-		if (CurrentCartridge->game != nullptr)
+		if (CurrentCartridge->game != nullptr) {
 			romName = CurrentCartridge->game->name;
+			settings.content.title = CurrentCartridge->game->description;
+		}
 		if (gameId == "SAMPLE GAME MAX LONG NAME-")
 		{
 			// Use better game names
@@ -651,7 +677,7 @@ void naomi_cart_LoadRom(const std::string& path, const std::string& fileName, Lo
 				|| gameId == "INITIAL D CYCRAFT")
 		{
 			card_reader::initdInit();
-			initMidiForceFeedback();
+			midiffb::init();
 		}
 		else if (gameId == "MAXIMUM SPEED" || gameId == "FASTER THAN SPEED")
 		{
@@ -662,7 +688,7 @@ void naomi_cart_LoadRom(const std::string& path, const std::string& fileName, Lo
 				|| gameId == "SEGA DRIVING SIMULATOR")
 		{
 			if (settings.naomi.drivingSimSlave == 0)
-				initMidiForceFeedback();
+				midiffb::init();
 			if (romName == "clubkrt" || romName == "clubkrto"
 					|| romName == "clubkrta" || romName == "clubkrtc")
 				card_reader::clubkInit();
@@ -698,6 +724,7 @@ void naomi_cart_LoadRom(const std::string& path, const std::string& fileName, Lo
 		{
 			hopper::init();
 		}
+		Naomi_setDmaDelay();
 
 #ifdef NAOMI_MULTIBOARD
 		// Not a multiboard game but needs the same desktop environment
@@ -775,7 +802,7 @@ void naomi_cart_serialize(Serializer& ser)
 
 void naomi_cart_deserialize(Deserializer& deser)
 {
-	if (CurrentCartridge != nullptr && (!settings.platform.isAtomiswave() || deser.version() >= Deserializer::V10_LIBRETRO))
+	if (CurrentCartridge != nullptr)
 		CurrentCartridge->Deserialize(deser);
 	touchscreen::deserialize(deser);
 	printer::deserialize(deser);
@@ -885,7 +912,7 @@ void* NaomiCartridge::GetDmaPtr(u32& size)
 {
 	if ((DmaOffset & 0x1fffffff) >= RomSize)
 	{
-		INFO_LOG(NAOMI, "Error: DmaOffset >= RomSize");
+		INFO_LOG(NAOMI, "Error: DmaOffset (%x) >= RomSize (%x)", DmaOffset, RomSize);
 		size = 0;
 		return nullptr;
 	}
@@ -1035,7 +1062,9 @@ void NaomiCartridge::WriteMem(u32 address, u32 data, u32 size)
 	}
 	if (multiboard != nullptr)
 		multiboard->writeG1(address, size, data);
-	else
+	else if (address != NAOMI_MBOARD_DATA_addr
+			&& address != NAOMI_MBOARD_OFFSET_addr
+			&& address != NAOMI_MBOARD_STATUS_addr)
 		DEBUG_LOG(NAOMI, "naomiCart::WriteMem<%d>: unknown %08x <= %x", size, address, data);
 }
 

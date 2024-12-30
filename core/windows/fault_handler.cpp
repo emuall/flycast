@@ -128,9 +128,11 @@ static LONG WINAPI exceptionHandler(EXCEPTION_POINTERS *ep)
 	// texture protection in VRAM
 	if (VramLockedWrite(address))
 		return EXCEPTION_CONTINUE_EXECUTION;
+#if FEAT_SHREC == DYNAREC_JIT
 	// FPCB jump table protection
 	if (addrspace::bm_lockedWrite(address))
 		return EXCEPTION_CONTINUE_EXECUTION;
+#endif
 
 	host_context_t context;
 	readContext(ep, context);
@@ -168,19 +170,4 @@ void os_UninstallFaultHandler()
 	RemoveVectoredExceptionHandler(vectoredHandler);
 #endif
 	SetUnhandledExceptionFilter(prevExceptionHandler);
-}
-
-double os_GetSeconds()
-{
-	static double qpfd = []() {
-		LARGE_INTEGER qpf;
-		QueryPerformanceFrequency(&qpf);
-		return 1.0 / qpf.QuadPart; }();
-
-	LARGE_INTEGER time_now;
-
-	QueryPerformanceCounter(&time_now);
-	static LARGE_INTEGER time_now_base = time_now;
-
-	return (time_now.QuadPart - time_now_base.QuadPart) * qpfd;
 }

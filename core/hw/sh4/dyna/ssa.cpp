@@ -18,6 +18,8 @@
     You should have received a copy of the GNU General Public License
     along with reicast.  If not, see <https://www.gnu.org/licenses/>.
  */
+#include "build.h"
+#if FEAT_SHREC != DYNAREC_NONE
 #include "blockmanager.h"
 #include "ssa.h"
 
@@ -166,9 +168,6 @@ bool SSAOptimizer::ExecuteConstOp(shil_opcode* op)
 			break;
 		case shop_swaplb:
 			rd = shil_opcl_swaplb::f1::impl(rs1);
-			break;
-		case shop_swap:
-			rd = shil_opcl_swap::f1::impl(rs1);
 			break;
 		case shop_seteq:
 			rd = shil_opcl_seteq::f1::impl(rs1, rs2);
@@ -372,3 +371,4 @@ bool SSAOptimizer::ExecuteConstOp(shil_opcode* op)
 		return false;
 	}
 }
+#endif	// FEAT_SHREC != DYNAREC_NONE

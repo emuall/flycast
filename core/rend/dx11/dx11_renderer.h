@@ -27,6 +27,7 @@
 #include "dx11_shaders.h"
 #include "dx11_renderstate.h"
 #include "dx11_naomi2.h"
+#include "rend/tileclip.h"
 #ifndef LIBRETRO
 #include "dx11_driver.h"
 #endif
@@ -41,18 +42,20 @@ struct DX11Renderer : public Renderer
 
 	bool Present() override
 	{
-		if (!frameRendered)
+		if (!frameRendered || clearLastFrame)
 			return false;
 		frameRendered = false;
 #ifndef LIBRETRO
 		imguiDriver->setFrameRendered();
+#else
+		theDX11Context.present();
 #endif
 		return true;
 	}
 
 	bool RenderLastFrame() override;
-	void DrawOSD(bool clear_screen) override;
 	BaseTextureCacheData *GetTexture(TSP tsp, TCW tcw) override;
+	bool GetLastFrame(std::vector<u8>& data, int& width, int& height) override;
 
 protected:
 	struct VertexConstants
@@ -98,6 +101,9 @@ protected:
 	virtual void setRTTSize(int width, int height) {}
 	void writeFramebufferToVRAM();
 	void renderVideoRouting();
+	void resetContextState();
+	void drawOSD();
+	TileClipping setTileClip(u32 val, int clip_rect[4]);
 
 	ComPtr<ID3D11Device> device;
 	ComPtr<ID3D11DeviceContext> deviceContext;

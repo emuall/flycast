@@ -20,8 +20,7 @@
 #include "dx11context.h"
 #include "hw/pvr/ta.h"
 #include "hw/pvr/pvr_mem.h"
-#include "rend/gui.h"
-#include "rend/tileclip.h"
+#include "ui/gui.h"
 #include "rend/sorter.h"
 
 #include <memory>
@@ -159,8 +158,7 @@ bool DX11Renderer::Init()
 	quad->init(device, deviceContext, shaders);
 	n2Helper.init(device, deviceContext);
 
-	fog_needs_update = true;
-	forcePaletteUpdate();
+	updateFogTable = true;
 
 	if (!success)
 	{
@@ -320,11 +318,34 @@ BaseTextureCacheData *DX11Renderer::GetTexture(TSP tsp, TCW tcw)
 
 void DX11Renderer::Process(TA_context* ctx)
 {
-	if (KillTex)
+	if (resetTextureCache) {
 		texCache.Clear();
+		resetTextureCache = false;
+	}
 	texCache.Cleanup();
 
 	ta_parse(ctx, true);
+}
+
+void DX11Renderer::resetContextState()
+{
+	// Reset device context state. Very much needed for libretro where current state is unknown.
+	deviceContext->OMSetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, 0, nullptr, nullptr);
+	deviceContext->PSSetShader(nullptr, nullptr, 0);
+	deviceContext->GSSetShader(nullptr, nullptr, 0);
+	deviceContext->HSSetShader(nullptr, nullptr, 0);
+	deviceContext->DSSetShader(nullptr, nullptr, 0);
+	deviceContext->CSSetShader(nullptr, nullptr, 0);
+	deviceContext->VSSetShader(nullptr, nullptr, 0);
+	ID3D11ShaderResourceView *nullview[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] {};
+	deviceContext->CSSetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, nullview);
+	deviceContext->DSSetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, nullview);
+	deviceContext->GSSetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, nullview);
+	deviceContext->HSSetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, nullview);
+	deviceContext->PSSetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, nullview);
+	deviceContext->VSSetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, nullview);
+	deviceContext->SetPredication(nullptr, false);
+	deviceContext->SOSetTargets(0, nullptr, nullptr);
 }
 
 void DX11Renderer::configVertexShader()
@@ -360,10 +381,6 @@ void DX11Renderer::configVertexShader()
 	memcpy(mappedSubres.pData, &constant, sizeof(constant));
 	deviceContext->Unmap(vtxConstants, 0);
 	deviceContext->VSSetConstantBuffers(0, 1, &vtxConstants.get());
-	deviceContext->GSSetShader(nullptr, nullptr, 0);
-	deviceContext->HSSetShader(nullptr, nullptr, 0);
-	deviceContext->DSSetShader(nullptr, nullptr, 0);
-	deviceContext->CSSetShader(nullptr, nullptr, 0);
 }
 
 void DX11Renderer::uploadGeometryBuffers()
@@ -455,9 +472,7 @@ void DX11Renderer::setupPixelShaderConstants()
 
 bool DX11Renderer::Render()
 {
-	// make sure to unbind the framebuffer view before setting it as render target
-	ID3D11ShaderResourceView *nullView = nullptr;
-    deviceContext->PSSetShaderResources(0, 1, &nullView);
+	resetContextState();
 	bool is_rtt = pvrrc.isRTT;
 	if (!is_rtt)
 	{
@@ -500,7 +515,7 @@ bool DX11Renderer::Render()
 #ifndef LIBRETRO
 		deviceContext->OMSetRenderTargets(1, &theDX11Context.getRenderTarget().get(), nullptr);
 		displayFramebuffer();
-		DrawOSD(false);
+		drawOSD();
 		renderVideoRouting();
 		theDX11Context.setFrameRendered();
 #else
@@ -510,6 +525,7 @@ bool DX11Renderer::Render()
 #endif
 		frameRendered = true;
 		frameRenderedOnce = true;
+		clearLastFrame = false;
 	}
 
 	return !is_rtt;
@@ -591,6 +607,19 @@ void DX11Renderer::setCullMode(int mode)
 	deviceContext->RSSetState(rasterizer);
 }
 
+TileClipping DX11Renderer::setTileClip(u32 tileclip, int clip_rect[4])
+{
+	TileClipping clipmode = GetTileClip(tileclip, matrices.GetViewportMatrix(), clip_rect);
+	if (clipmode == TileClipping::Outside) {
+		RECT rect { clip_rect[0], clip_rect[1], clip_rect[0] + clip_rect[2], clip_rect[1] + clip_rect[3] };
+		deviceContext->RSSetScissorRects(1, &rect);
+	}
+	else {
+		deviceContext->RSSetScissorRects(1, &scissorRect);
+	}
+	return clipmode;
+}
+
 template <u32 Type, bool SortingEnabled>
 void DX11Renderer::setRenderState(const PolyParam *gp)
 {
@@ -609,7 +638,7 @@ void DX11Renderer::setRenderState(const PolyParam *gp)
 	int fog_ctrl = config::Fog ? gp->tsp.FogCtrl : 2;
 
 	int clip_rect[4] = {};
-	TileClipping clipmode = GetTileClip(gp->tileclip, matrices.GetViewportMatrix(), clip_rect);
+	TileClipping clipmode = setTileClip(gp->tileclip, clip_rect);
 	DX11Texture *texture = (DX11Texture *)gp->texture;
 	int gpuPalette = texture == nullptr || !texture->gpuPalette ? 0
 			: gp->tsp.FilterMode + 1;
@@ -648,21 +677,12 @@ void DX11Renderer::setRenderState(const PolyParam *gp)
 			constants.paletteIndex = (float)((gp->tcw.PalSelect >> 4) << 8);
 	}
 
-	if (clipmode == TileClipping::Outside)
+	if (clipmode == TileClipping::Inside)
 	{
-		RECT rect { clip_rect[0], clip_rect[1], clip_rect[0] + clip_rect[2], clip_rect[1] + clip_rect[3] };
-		deviceContext->RSSetScissorRects(1, &rect);
-	}
-	else
-	{
-		deviceContext->RSSetScissorRects(1, &scissorRect);
-		if (clipmode == TileClipping::Inside)
-		{
-			constants.clipTest[0] = (float)clip_rect[0];
-			constants.clipTest[1] = (float)clip_rect[1];
-			constants.clipTest[2] = (float)(clip_rect[0] + clip_rect[2]);
-			constants.clipTest[3] = (float)(clip_rect[1] + clip_rect[3]);
-		}
+		constants.clipTest[0] = (float)clip_rect[0];
+		constants.clipTest[1] = (float)clip_rect[1];
+		constants.clipTest[2] = (float)(clip_rect[0] + clip_rect[2]);
+		constants.clipTest[3] = (float)(clip_rect[1] + clip_rect[3]);
 	}
 	if (constants.trilinearAlpha != 1.f || gpuPalette != 0 || clipmode == TileClipping::Inside)
 	{
@@ -813,7 +833,6 @@ void DX11Renderer::drawModVols(int first, int count)
 
 	deviceContext->PSSetShader(shaders->getModVolShader(), nullptr, 0);
 
-	deviceContext->RSSetScissorRects(1, &scissorRect);
 	setCullMode(0);
 
 	const ModifierVolumeParam *params = &pvrrc.global_param_mvo[first];
@@ -844,6 +863,10 @@ void DX11Renderer::drawModVols(int first, int count)
 		else
 			// XOR'ing (closed volume)
 			deviceContext->OMSetDepthStencilState(depthStencilStates.getMVState(DepthStencilStates::Xor), 0);
+
+		int clip_rect[4] = {};
+		setTileClip(param.tileclip, clip_rect);
+		// TODO inside clipping
 
 		if (param.count > 0)
 		{
@@ -916,7 +939,7 @@ void DX11Renderer::drawStrips()
 
 bool DX11Renderer::RenderLastFrame()
 {
-	if (!frameRenderedOnce)
+	if (!frameRenderedOnce || clearLastFrame)
 		return false;
 	displayFramebuffer();
 	return true;
@@ -1008,7 +1031,7 @@ void DX11Renderer::RenderFramebuffer(const FramebufferInfo& info)
 
 	deviceContext->OMSetRenderTargets(1, &theDX11Context.getRenderTarget().get(), nullptr);
 	displayFramebuffer();
-	DrawOSD(false);
+	drawOSD();
 	renderVideoRouting();
 	theDX11Context.setFrameRendered();
 #else
@@ -1018,6 +1041,7 @@ void DX11Renderer::RenderFramebuffer(const FramebufferInfo& info)
 #endif
 	frameRendered = true;
 	frameRenderedOnce = true;
+	clearLastFrame = false;
 }
 
 void DX11Renderer::setBaseScissor()
@@ -1202,34 +1226,35 @@ void DX11Renderer::readRttRenderTarget(u32 texAddress)
 
 void DX11Renderer::updatePaletteTexture()
 {
-	if (!palette_updated)
-		return;
-	palette_updated = false;
-
-	deviceContext->UpdateSubresource(paletteTexture, 0, nullptr, palette32_ram, 32 * sizeof(u32), 32 * sizeof(u32) * 32);
-
+	if (updatePalette)
+	{
+		updatePalette = false;
+		deviceContext->UpdateSubresource(paletteTexture, 0, nullptr, palette32_ram, 32 * sizeof(u32), 32 * sizeof(u32) * 32);
+	}
     deviceContext->PSSetShaderResources(1, 1, &paletteTextureView.get());
     deviceContext->PSSetSamplers(1, 1, &samplers->getSampler(false).get());
 }
 
 void DX11Renderer::updateFogTexture()
 {
-	if (!fog_needs_update || !config::Fog)
+	if (!config::Fog)
 		return;
-	fog_needs_update = false;
-	u8 temp_tex_buffer[256];
-	MakeFogTexture(temp_tex_buffer);
+	if (updateFogTable)
+	{
+		updateFogTable = false;
+		u8 temp_tex_buffer[256];
+		MakeFogTexture(temp_tex_buffer);
 
-	deviceContext->UpdateSubresource(fogTexture, 0, nullptr, temp_tex_buffer, 128, 128 * 2);
-
+		deviceContext->UpdateSubresource(fogTexture, 0, nullptr, temp_tex_buffer, 128, 128 * 2);
+	}
     deviceContext->PSSetShaderResources(2, 1, &fogTextureView.get());
     deviceContext->PSSetSamplers(2, 1, &samplers->getSampler(true).get());
 }
 
-void DX11Renderer::DrawOSD(bool clear_screen)
+void DX11Renderer::drawOSD()
 {
 #ifndef LIBRETRO
-	theDX11Context.setOverlay(!clear_screen);
+	theDX11Context.setOverlay(true);
 	gui_display_osd();
 	theDX11Context.setOverlay(false);
 #endif
@@ -1343,6 +1368,99 @@ void DX11Renderer::writeFramebufferToVRAM()
 	yClip.min = std::min(yClip.min, height - 1);
 	yClip.max = std::min(yClip.max, height - 1);
 	WriteFramebuffer<2, 1, 0, 3>(width, height, (u8 *)tmp_buf.data(), texAddress, pvrrc.fb_W_CTRL, linestride, xClip, yClip);
+}
+
+bool DX11Renderer::GetLastFrame(std::vector<u8>& data, int& width, int& height)
+{
+	if (!frameRenderedOnce)
+		return false;
+
+	if (width != 0) {
+		height = width / aspectRatio;
+	}
+	else if (height != 0) {
+		width = aspectRatio * height;
+	}
+	else
+	{
+		width = this->width;
+		height = this->height;
+		if (config::Rotate90)
+			std::swap(width, height);
+		// We need square pixels for PNG
+		int w = aspectRatio * height;
+		if (width > w)
+			height = width / aspectRatio;
+		else
+			width = w;
+	}
+
+	ComPtr<ID3D11Texture2D> dstTex;
+	ComPtr<ID3D11RenderTargetView> dstRenderTarget;
+	createTexAndRenderTarget(dstTex, dstRenderTarget, width, height);
+
+	ID3D11ShaderResourceView *nullResView = nullptr;
+	deviceContext->PSSetShaderResources(0, 1, &nullResView);
+	deviceContext->OMSetRenderTargets(1, &dstRenderTarget.get(), nullptr);
+	D3D11_VIEWPORT vp{};
+	vp.Width = (FLOAT)width;
+	vp.Height = (FLOAT)height;
+	vp.MinDepth = 0.f;
+	vp.MaxDepth = 1.f;
+	deviceContext->RSSetViewports(1, &vp);
+	const D3D11_RECT r = { 0, 0, (LONG)width, (LONG)height };
+	deviceContext->RSSetScissorRects(1, &r);
+	deviceContext->OMSetBlendState(blendStates.getState(false), nullptr, 0xffffffff);
+	deviceContext->GSSetShader(nullptr, nullptr, 0);
+	deviceContext->HSSetShader(nullptr, nullptr, 0);
+	deviceContext->DSSetShader(nullptr, nullptr, 0);
+	deviceContext->CSSetShader(nullptr, nullptr, 0);
+
+	quad->draw(fbTextureView, samplers->getSampler(true), nullptr, -1.f, -1.f, 2.f, 2.f, config::Rotate90);
+
+#ifndef LIBRETRO
+	deviceContext->OMSetRenderTargets(1, &theDX11Context.getRenderTarget().get(), nullptr);
+#else
+	ID3D11RenderTargetView *nullView = nullptr;
+	deviceContext->OMSetRenderTargets(1, &nullView, nullptr);
+#endif
+	D3D11_TEXTURE2D_DESC desc;
+	dstTex->GetDesc(&desc);
+	desc.Usage = D3D11_USAGE_STAGING;
+	desc.BindFlags = 0;
+	desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+	ComPtr<ID3D11Texture2D> stagingTex;
+	HRESULT hr = device->CreateTexture2D(&desc, nullptr, &stagingTex.get());
+	if (FAILED(hr))
+	{
+		WARN_LOG(RENDERER, "Staging screenshot texture creation failed");
+		return false;
+	}
+	deviceContext->CopyResource(stagingTex, dstTex);
+
+	D3D11_MAPPED_SUBRESOURCE mappedSubres;
+	hr = deviceContext->Map(stagingTex, 0, D3D11_MAP_READ, 0, &mappedSubres);
+	if (FAILED(hr))
+	{
+		WARN_LOG(RENDERER, "Failed to map staging screenshot texture");
+		return false;
+	}
+	const u8* const src = (const u8 *)mappedSubres.pData;
+	for (int y = 0; y < height; y++)
+	{
+		const u8 *p = src + y * mappedSubres.RowPitch;
+		for (int x = 0; x < width; x++, p += 4)
+		{
+			data.push_back(p[2]);
+			data.push_back(p[1]);
+			data.push_back(p[0]);
+		}
+	}
+	deviceContext->Unmap(stagingTex, 0);
+
+	return true;
 }
 
 void DX11Renderer::renderVideoRouting()

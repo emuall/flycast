@@ -21,6 +21,8 @@
 #pragma once
 
 #ifdef USE_VULKAN
+#include "vulkan.h"
+
 #include <stdexcept>
 
 class InvalidVulkanContext : public std::runtime_error {
@@ -28,16 +30,67 @@ public:
 	InvalidVulkanContext() : std::runtime_error("Invalid Vulkan context") {}
 };
 
+// RAII utility-object for adding debug-scopes to command buffers
+#ifdef VK_DEBUG
+class CommandBufferDebugScope {
+private:
+	const vk::CommandBuffer commandBuffer;
+
+public:
+	CommandBufferDebugScope(
+		vk::CommandBuffer targetCommandBuffer,
+		std::string_view scopeName, const float scopeColor[4]
+	) : commandBuffer(targetCommandBuffer)
+	{
+		vk::DebugUtilsLabelEXT label{};
+		label.pLabelName = scopeName.data();
+		std::copy_n(scopeColor, 4, label.color.data());
+		commandBuffer.beginDebugUtilsLabelEXT(label);
+	}
+
+	void operator()(std::string_view scopeName, const float scopeColor[4]) const
+	{
+		vk::DebugUtilsLabelEXT label{};
+		label.pLabelName = scopeName.data();
+		std::copy_n(scopeColor, 4, label.color.data());
+		commandBuffer.insertDebugUtilsLabelEXT(label);
+	}
+
+	~CommandBufferDebugScope()
+	{
+		commandBuffer.endDebugUtilsLabelEXT();
+	}
+};
+#else
+class CommandBufferDebugScope {
+public:
+	CommandBufferDebugScope(
+		vk::CommandBuffer targetCommandBuffer,
+		std::string_view scopeName, const float scopeColor[4]
+	)
+	{
+	}
+
+	void operator()(std::string_view scopeName, const float scopeColor[4]) const
+	{
+	}
+
+	~CommandBufferDebugScope()
+	{
+	}
+};
+#endif
+
 #ifdef LIBRETRO
 #include "vk_context_lr.h"
 #else
 
-#include "vulkan.h"
 #include "vmallocator.h"
 #include "quad.h"
-#include "rend/TexCache.h"
+#include "rend/texconv.h"
 #include "overlay.h"
 #include "wsi/context.h"
+#include <vector>
 
 struct ImDrawData;
 
@@ -60,6 +113,7 @@ public:
 	void Present() noexcept;
 	void PresentFrame(vk::Image image, vk::ImageView imageView, const vk::Extent2D& extent, float aspectRatio) noexcept;
 	void PresentLastFrame();
+	bool GetLastFrame(std::vector<u8>& data, int& width, int& height);
 
 	vk::PhysicalDevice GetPhysicalDevice() const { return physicalDevice; }
 	vk::Device GetDevice() const { return *device; }
@@ -113,17 +167,19 @@ public:
 				vk::SubmitInfo(nullptr, nullptr, buffers), fence);
 	}
 	bool hasPerPixel() override { return fragmentStoresAndAtomics; }
+	bool hasProvokingVertex() { return provokingVertexSupported; }
 	bool recreateSwapChainIfNeeded();
 	void addToFlight(Deletable *object) override {
 		inFlightObjects[GetCurrentImageIndex()].emplace_back(object);
 	}
 
 #ifdef VK_DEBUG
-	void setObjectName(VkHandle object, vk::ObjectType objectType, const std::string& name)
+	template<typename HandleType, typename = std::enable_if_t<vk::isVulkanHandleType<HandleType>::value>>
+	void setObjectName(const HandleType& object, const std::string& name)
 	{
 		vk::DebugUtilsObjectNameInfoEXT nameInfo {};
-		nameInfo.objectType = objectType;
-		nameInfo.objectHandle = (uint64_t)object;
+		nameInfo.objectType = HandleType::objectType;
+		nameInfo.objectHandle = reinterpret_cast<uint64_t>(static_cast<typename HandleType::NativeType>(object));
 		nameInfo.pObjectName = name.c_str();
 		if (device) {
 			vk::Result e = device->setDebugUtilsObjectNameEXT(&nameInfo);
@@ -174,6 +230,7 @@ private:
 	bool samplerAnisotropy = false;
 	float maxSamplerAnisotropy = 0.f;
 	bool dedicatedAllocationSupported = false;
+	bool provokingVertexSupported = false;
 	u32 vendorID = 0;
 	int swapInterval = 1;
 	vk::UniqueDevice device;

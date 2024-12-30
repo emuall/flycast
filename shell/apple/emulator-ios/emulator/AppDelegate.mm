@@ -23,10 +23,12 @@
 #import "AppDelegate.h"
 #import <AVFoundation/AVFoundation.h>
 
+#include <mach/task.h>
+#include <mach/mach_init.h>
 #include "emulator.h"
 #include "log/LogManager.h"
 #include "cfg/option.h"
-#include "rend/gui.h"
+#include "ui/gui.h"
 
 static bool emulatorRunning;
 
@@ -49,6 +51,11 @@ static bool emulatorRunning;
 	[session setActive:YES error:&error];
 	if (error != nil)
 		NSLog(@"AVAudioSession.setActive:  %@", error);
+
+    if (getppid() != 1) {
+        /* Make LLDB ignore EXC_BAD_ACCESS for debugging */
+        task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS, MACH_PORT_NULL, EXCEPTION_DEFAULT, 0);
+    }
 
     return YES;
 }
@@ -73,7 +80,6 @@ static bool emulatorRunning;
 {
     // Use this method to release shared resources, save user data, invalidate timers, and store enough application state information to restore your application to its current state in case it is terminated later. 
     // If your application supports background execution, this method is called instead of applicationWillTerminate: when the user quits.
-    gui_save();
 	if (config::AutoSaveState && !settings.content.path.empty())
 		dc_savestate(config::SavestateSlot);
 }

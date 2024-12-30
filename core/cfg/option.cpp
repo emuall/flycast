@@ -108,6 +108,7 @@ Option<int> PerPixelLayers("rend.PerPixelLayers", 32);
 Option<bool> NativeDepthInterpolation("rend.NativeDepthInterpolation", false);
 Option<bool> EmulateFramebuffer("rend.EmulateFramebuffer", false);
 Option<bool> FixUpscaleBleedingEdge("rend.FixUpscaleBleedingEdge", true);
+Option<bool> CustomGpuDriver("rend.CustomGpuDriver", false);
 #ifdef VIDEO_ROUTING
 Option<bool, false> VideoRouting("rend.VideoRouting", false);
 Option<bool, false> VideoRoutingScale("rend.VideoRoutingScale", false);
@@ -130,6 +131,10 @@ Option<bool> OpenGlChecks("OpenGlChecks", false, "validate");
 Option<std::vector<std::string>, false> ContentPath("Dreamcast.ContentPath");
 Option<bool, false> HideLegacyNaomiRoms("Dreamcast.HideLegacyNaomiRoms", true);
 Option<bool, false> UploadCrashLogs("UploadCrashLogs", true);
+Option<bool, false> DiscordPresence("DiscordPresence", true);
+#if defined(__ANDROID__) && !defined(LIBRETRO)
+Option<bool, false> UseSafFilePicker("UseSafFilePicker", true);
+#endif
 
 // Profiler
 Option<bool> ProfilerEnabled("Profiler.Enabled");
@@ -141,7 +146,7 @@ Option<float> ProfilerFrameWarningTime("Profiler.FrameWarningTime", 1.0f / 55.0f
 
 Option<bool> NetworkEnable("Enable", false, "network");
 Option<bool> ActAsServer("ActAsServer", false, "network");
-OptionString DNS("DNS", "46.101.91.123", "network");
+OptionString DNS("DNS", "dns.flyca.st", "network");
 OptionString NetworkServer("server", "", "network");
 Option<int> LocalPort("LocalPort", NaomiNetwork::SERVER_PORT, "network");
 Option<bool> EmulateBBA("EmulateBBA", false, "network");
@@ -157,10 +162,6 @@ Option<bool> NetworkOutput("NetworkOutput", false, "network");
 Option<int> MultiboardSlaves("MultiboardSlaves", 1, "network");
 Option<bool> BattleCableEnable("BattleCable", false, "network");
 
-#ifdef SUPPORT_DISPMANX
-Option<bool> DispmanxMaintainAspect("maintain_aspect", true, "dispmanx");
-#endif
-
 #ifdef USE_OMX
 Option<int> OmxAudioLatency("audio_latency", 100, "omx");
 Option<bool> OmxAudioHdmi("audio_hdmi", true, "omx");
@@ -170,6 +171,7 @@ Option<bool> OmxAudioHdmi("audio_hdmi", true, "omx");
 
 Option<int> MouseSensitivity("MouseSensitivity", 100, "input");
 Option<int> VirtualGamepadVibration("VirtualGamepadVibration", 20, "input");
+Option<int> VirtualGamepadTransparency("VirtualGamepadTransparency", 37, "input");
 
 std::array<Option<MapleDeviceType>, 4> MapleMainDevices {
 	Option<MapleDeviceType>("device1", MDT_SegaController, "input"),
@@ -198,5 +200,12 @@ Option<bool, false> UseRawInput("RawInput", false, "input");
 #ifdef USE_LUA
 Option<std::string, false> LuaFileName("LuaFileName", "flycast.lua");
 #endif
+
+// RetroAchievements
+
+Option<bool> EnableAchievements("Enabled", false, "achievements");
+Option<bool> AchievementsHardcoreMode("HardcoreMode", false, "achievements");
+OptionString AchievementsUserName("UserName", "", "achievements");
+OptionString AchievementsToken("Token", "", "achievements");
 
 } // namespace config

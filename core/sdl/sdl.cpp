@@ -14,6 +14,7 @@
 #include "hw/maple/maple_devs.h"
 #include "sdl_gamepad.h"
 #include "sdl_keyboard.h"
+#include "sdl_keyboard_mac.h"
 #include "wsi/context.h"
 #include "emulator.h"
 #include "stdclass.h"
@@ -29,6 +30,7 @@
 #include "nswitch.h"
 #include "switch_gamepad.h"
 #endif
+#include "dreamconn.h"
 #include <unordered_map>
 
 static SDL_Window* window = NULL;
@@ -37,6 +39,7 @@ static u32 windowFlags;
 #define WINDOW_WIDTH  640
 #define WINDOW_HEIGHT  480
 
+std::map<SDL_JoystickID, std::shared_ptr<SDLGamepad>> SDLGamepad::sdl_gamepads;
 static std::unordered_map<u64, std::shared_ptr<SDLMouse>> sdl_mice;
 static std::shared_ptr<SDLKeyboardDevice> sdl_keyboard;
 static bool window_fullscreen;
@@ -46,10 +49,13 @@ static bool gameRunning;
 static bool mouseCaptured;
 static std::string clipboardText;
 static std::string barcode;
-static double lastBarcodeTime;
+static u64 lastBarcodeTime;
 
 static KeyboardLayout detectKeyboardLayout();
 static bool handleBarcodeScanner(const SDL_Event& event);
+void sdl_stopHaptic(int port);
+static void pauseHaptic();
+static void resumeHaptic();
 
 static struct SDLDeInit
 {
@@ -63,6 +69,8 @@ static struct SDLDeInit
 
 static void sdl_open_joystick(int index)
 {
+	if (settings.naomi.slave)
+		return;
 	SDL_Joystick *pJoystick = SDL_JoystickOpen(index);
 
 	if (pJoystick == NULL)
@@ -74,7 +82,11 @@ static void sdl_open_joystick(int index)
 #ifdef __SWITCH__
 		std::shared_ptr<SDLGamepad> gamepad = std::make_shared<SwitchGamepad>(index < MAPLE_PORTS ? index : -1, index, pJoystick);
 #else
-		std::shared_ptr<SDLGamepad> gamepad = std::make_shared<SDLGamepad>(index < MAPLE_PORTS ? index : -1, index, pJoystick);
+		std::shared_ptr<SDLGamepad> gamepad;
+		if (DreamConnGamepad::isDreamConn(index))
+			gamepad = std::make_shared<DreamConnGamepad>(index < MAPLE_PORTS ? index : -1, index, pJoystick);
+		else
+			gamepad = std::make_shared<SDLGamepad>(index < MAPLE_PORTS ? index : -1, index, pJoystick);
 #endif
 		SDLGamepad::AddSDLGamepad(gamepad);
 	} catch (const FlycastException& e) {
@@ -83,9 +95,19 @@ static void sdl_open_joystick(int index)
 
 static void sdl_close_joystick(SDL_JoystickID instance)
 {
+	if (settings.naomi.slave)
+		return;
 	std::shared_ptr<SDLGamepad> gamepad = SDLGamepad::GetSDLGamepad(instance);
 	if (gamepad != NULL)
 		gamepad->close();
+}
+
+static void setWindowTitleGame()
+{
+	if (settings.naomi.slave)
+		SDL_SetWindowTitle(window, ("Flycast - Multiboard Slave " + cfgLoadStr("naomi", "BoardId", "")).c_str());
+	else
+		SDL_SetWindowTitle(window, ("Flycast - " + settings.content.title).c_str());
 }
 
 static void captureMouse(bool capture)
@@ -98,7 +120,7 @@ static void captureMouse(bool capture)
 			SDL_SetRelativeMouseMode(SDL_FALSE);
 		else
 			SDL_ShowCursor(SDL_ENABLE);
-		SDL_SetWindowTitle(window, "Flycast");
+		setWindowTitleGame();
 		mouseCaptured = false;
 	}
 	else
@@ -118,19 +140,24 @@ static void emuEventCallback(Event event, void *)
 {
 	switch (event)
 	{
+	case Event::Terminate:
+		SDL_SetWindowTitle(window, "Flycast");
+		sdl_stopHaptic(0);
+		break;
 	case Event::Pause:
 		gameRunning = false;
 		if (!config::UseRawInput)
 			SDL_SetRelativeMouseMode(SDL_FALSE);
 		SDL_ShowCursor(SDL_ENABLE);
-		SDL_SetWindowTitle(window, "Flycast");
+		setWindowTitleGame();
+		pauseHaptic();
 		break;
 	case Event::Resume:
 		gameRunning = true;
 		captureMouse(mouseCaptured);
 		if (window_fullscreen && !mouseCaptured)
 			SDL_ShowCursor(SDL_DISABLE);
-
+		resumeHaptic();
 		break;
 	default:
 		break;
@@ -160,7 +187,11 @@ static void checkRawInput()
 #else
 	if (!sdl_keyboard)
 	{
+#ifdef __APPLE__
+		sdl_keyboard = std::make_shared<SDLMacKeyboard>(0);
+#else
 		sdl_keyboard = std::make_shared<SDLKeyboardDevice>(0);
+#endif
 		GamepadDevice::Register(sdl_keyboard);
 	}
 #endif
@@ -196,9 +227,14 @@ void input_sdl_init()
 			die("SDL: error initializing Joystick subsystem");
 	}
 	sdlDeInit.initialized = true;
+	if (SDL_WasInit(SDL_INIT_HAPTIC) == 0)
+		SDL_InitSubSystem(SDL_INIT_HAPTIC);
 
 	SDL_SetRelativeMouseMode(SDL_FALSE);
 
+	// Event::Start is called on a background thread, so we can't use it to change the window title (macOS)
+	// However it's followed by Event::Resume which is fine.
+	EventManager::listen(Event::Terminate, emuEventCallback);
 	EventManager::listen(Event::Pause, emuEventCallback);
 	EventManager::listen(Event::Resume, emuEventCallback);
 
@@ -234,11 +270,15 @@ void input_sdl_init()
 
 void input_sdl_quit()
 {
+	EventManager::unlisten(Event::Terminate, emuEventCallback);
+	EventManager::unlisten(Event::Pause, emuEventCallback);
+	EventManager::unlisten(Event::Resume, emuEventCallback);
 	SDLGamepad::closeAllGamepads();
-	SDL_QuitSubSystem(SDL_INIT_JOYSTICK);
+	SDL_QuitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_HAPTIC);
 }
 
-inline void SDLMouse::setAbsPos(int x, int y) {
+inline void SDLMouse::setAbsPos(int x, int y)
+{
 	int width, height;
 	SDL_GetWindowSize(window, &width, &height);
 	if (width != 0 && height != 0)
@@ -540,12 +580,6 @@ void input_sdl_handle()
 	}
 }
 
-void sdl_window_set_text(const char* text)
-{
-	if (window != nullptr)
-		SDL_SetWindowTitle(window, text);
-}
-
 static float hdpiScaling = 1.f;
 
 static inline void get_window_state()
@@ -738,7 +772,6 @@ static int suspendEventFilter(void *userdata, SDL_Event *event)
 {
 	if (event->type == SDL_APP_WILLENTERBACKGROUND)
 	{
-		gui_save();
 		if (gameRunning)
 		{
 			try {
@@ -1157,8 +1190,8 @@ static bool handleBarcodeScanner(const SDL_Event& event)
 			return false;
 		}
 	}
-	double now = os_GetSeconds();
-	if (!barcode.empty() && now - lastBarcodeTime >= 0.5)
+	u64 now = getTimeMs();
+	if (!barcode.empty() && now - lastBarcodeTime >= 500)
 	{
 		INFO_LOG(INPUT, "Barcode timeout");
 		barcode.clear();
@@ -1187,3 +1220,86 @@ static bool handleBarcodeScanner(const SDL_Event& event)
 
 	return true;
 }
+
+static float torque;
+static float springSat;
+static float springSpeed;
+static float damperParam;
+static float damperSpeed;
+
+void sdl_setTorque(int port, float torque)
+{
+	::torque = torque;
+	if (gameRunning)
+		SDLGamepad::SetTorque(port, torque);
+}
+
+void sdl_setSpring(int port, float saturation, float speed)
+{
+	springSat = saturation;
+	springSpeed = speed;
+	SDLGamepad::SetSpring(port, saturation, speed);
+}
+
+void sdl_setDamper(int port, float param, float speed)
+{
+	damperParam = param;
+	damperSpeed = speed;
+	SDLGamepad::SetDamper(port, param, speed);
+}
+
+void sdl_stopHaptic(int port)
+{
+	torque = 0.f;
+	springSat = 0.f;
+	springSpeed = 0.f;
+	damperParam = 0.f;
+	damperSpeed = 0.f;
+	SDLGamepad::StopHaptic(port);
+}
+
+void pauseHaptic() {
+	SDLGamepad::SetTorque(0, 0.f);
+}
+
+void resumeHaptic() {
+	SDLGamepad::SetTorque(0, torque);
+}
+
+#if 0
+#include "ui/gui_util.h"
+
+void sdl_displayHapticStats()
+{
+	ImguiStyleVar _(ImGuiStyleVar_WindowRounding, 0);
+	ImguiStyleVar _1(ImGuiStyleVar_WindowBorderSize, 0);
+	ImGui::SetNextWindowPos(ImVec2(10, 10));
+	ImGui::SetNextWindowSize(ScaledVec2(120, 0));
+	ImGui::SetNextWindowBgAlpha(0.7f);
+	ImGui::Begin("##ggpostats", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs);
+	ImguiStyleColor _2(ImGuiCol_PlotHistogram, ImVec4(0.557f, 0.268f, 0.965f, 1.f));
+
+	ImGui::Text("Torque");
+	char s[32];
+	snprintf(s, sizeof(s), "%.1f", torque);
+	ImGui::ProgressBar(0.5f + torque / 2.f, ImVec2(-1, 0), s);
+
+	ImGui::Text("Spring Sat");
+	snprintf(s, sizeof(s), "%.1f", springSat);
+	ImGui::ProgressBar(springSat, ImVec2(-1, 0), s);
+
+	ImGui::Text("Spring Speed");
+	snprintf(s, sizeof(s), "%.1f", springSpeed);
+	ImGui::ProgressBar(springSpeed, ImVec2(-1, 0), s);
+
+	ImGui::Text("Damper Param");
+	snprintf(s, sizeof(s), "%.1f", damperParam);
+	ImGui::ProgressBar(damperParam, ImVec2(-1, 0), s);
+
+	ImGui::Text("Damper Speed");
+	snprintf(s, sizeof(s), "%.1f", damperSpeed);
+	ImGui::ProgressBar(damperSpeed, ImVec2(-1, 0), s);
+
+	ImGui::End();
+}
+#endif

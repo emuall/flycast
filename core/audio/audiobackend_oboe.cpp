@@ -91,6 +91,7 @@ public:
 				->setFormat(oboe::AudioFormat::I16)
 				->setChannelCount(oboe::ChannelCount::Stereo)
 				->setSampleRate(44100)
+				->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::High)
 				->setFramesPerCallback(SAMPLE_COUNT)
 				->setDataCallback(&audioCallback)
 				->setErrorCallback(&errorCallback)
@@ -175,7 +176,7 @@ public:
 		}
 		recordStream->requestStart();
 		NOTICE_LOG(AUDIO, "Oboe recorder started. stream capacity: %d frames",
-				stream->getBufferCapacityInFrames());
+				recordStream->getBufferCapacityInFrames());
 
 		return true;
 	}

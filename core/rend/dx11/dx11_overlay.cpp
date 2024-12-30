@@ -56,7 +56,7 @@ void DX11Overlay::draw(u32 width, u32 height, bool vmu, bool crosshair)
 				vmuTextures[i].reset();
 				continue;
 			}
-			if (vmuTextures[i] == nullptr || vmu_lcd_changed[i])
+			if (vmuTextures[i] == nullptr || this->vmuLastChanged[i] != ::vmuLastChanged[i])
 			{
 				vmuTextureViews[i].reset();
 				vmuTextures[i].reset();
@@ -82,8 +82,8 @@ void DX11Overlay::draw(u32 width, u32 height, bool vmu, bool crosshair)
 					for (int y = 0; y < 32; y++)
 						memcpy(&data[y * 48], &vmu_lcd_data[i][(31 - y) * 48], sizeof(u32) * 48);
 					deviceContext->UpdateSubresource(vmuTextures[i], 0, nullptr, data, 48 * 4, 48 * 4 * 32);
+					this->vmuLastChanged[i] = ::vmuLastChanged[i];
 				}
-				vmu_lcd_changed[i] = false;
 			}
 			float x, y;
 			float w = vmu_width;
@@ -142,39 +142,36 @@ void DX11Overlay::draw(u32 width, u32 height, bool vmu, bool crosshair)
 			quad.draw(vmuTextureViews[i], samplers->getSampler(false));
 		}
 	}
-	if (crosshair && crosshairsNeeded())
+	if (crosshair)
 	{
-		if (!xhairTexture)
-		{
-			const u32* texData = getCrosshairTextureData();
-			D3D11_TEXTURE2D_DESC desc{};
-			desc.Width = 16;
-			desc.Height = 16;
-			desc.ArraySize = 1;
-			desc.SampleDesc.Count = 1;
-			desc.Usage = D3D11_USAGE_DEFAULT;
-			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-			desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-			desc.MipLevels = 1;
-
-			if (SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &xhairTexture.get())))
-			{
-				D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
-				viewDesc.Format = desc.Format;
-				viewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-				viewDesc.Texture2D.MipLevels = desc.MipLevels;
-				device->CreateShaderResourceView(xhairTexture, &viewDesc, &xhairTextureView.get());
-
-				deviceContext->UpdateSubresource(xhairTexture, 0, nullptr, texData, 16 * 4, 16 * 4 * 16);
-			}
-		}
 		for (u32 i = 0; i < config::CrosshairColor.size(); i++)
 		{
-			if (config::CrosshairColor[i] == 0)
+			if (!crosshairNeeded(i))
 				continue;
-			if (settings.platform.isConsole()
-					&& config::MapleMainDevices[i] != MDT_LightGun)
-				continue;
+			if (!xhairTexture)
+			{
+				const u32* texData = getCrosshairTextureData();
+				D3D11_TEXTURE2D_DESC desc{};
+				desc.Width = 16;
+				desc.Height = 16;
+				desc.ArraySize = 1;
+				desc.SampleDesc.Count = 1;
+				desc.Usage = D3D11_USAGE_DEFAULT;
+				desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+				desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+				desc.MipLevels = 1;
+
+				if (SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &xhairTexture.get())))
+				{
+					D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
+					viewDesc.Format = desc.Format;
+					viewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+					viewDesc.Texture2D.MipLevels = desc.MipLevels;
+					device->CreateShaderResourceView(xhairTexture, &viewDesc, &xhairTextureView.get());
+
+					deviceContext->UpdateSubresource(xhairTexture, 0, nullptr, texData, 16 * 4, 16 * 4 * 16);
+				}
+			}
 
 			auto [x, y] = getCrosshairPosition(i);
 #ifdef LIBRETRO

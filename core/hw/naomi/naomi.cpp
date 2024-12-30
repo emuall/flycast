@@ -30,9 +30,10 @@
 #include "serialize.h"
 #include "network/output.h"
 #include "hw/sh4/modules/modules.h"
-#include "rend/gui.h"
+#include "oslib/oslib.h"
 #include "printer.h"
 #include "hw/flashrom/x76f100.h"
+#include "input/haptic.h"
 
 #include <algorithm>
 
@@ -42,10 +43,8 @@ Multiboard *multiboard;
 static X76F100SerialFlash mainSerialId;
 static X76F100SerialFlash romSerialId;
 
-static u8 midiTxBuf[4];
-static u32 midiTxBufIndex;
-
 static int dmaSchedId = -1;
+static int dmaXferDelay = 10;	// cart dma xfer speed, in cycles/byte (default 20 MB/s)
 
 void NaomiBoardIDWrite(const u16 data)
 {
@@ -113,9 +112,9 @@ void WriteMem_naomi(u32 address, u32 data, u32 size)
 
 static int naomiDmaSched(int tag, int sch_cycl, int jitter, void *arg)
 {
-	u32 start = SB_GDSTAR & 0x1FFFFFE0;
-	u32 len = (SB_GDLEN + 31) & ~31;
-	SB_GDLEND = 0;
+	u32 start = SB_GDSTARD;
+	u32 len = std::min<int>(((SB_GDLEN + 31) & ~31) - SB_GDLEND, 1024);
+	SB_GDLEND += len;
 	while (len > 0)
 	{
 		u32 block_len = len;
@@ -125,20 +124,23 @@ static int naomiDmaSched(int tag, int sch_cycl, int jitter, void *arg)
 			INFO_LOG(NAOMI, "Aborted DMA transfer. Read past end of cart?");
 			for (u32 i = 0; i < len; i += 8, start += 8)
 				addrspace::write64(start, 0);
-			SB_GDLEND += len;
 			break;
 		}
 		WriteMemBlock_nommu_ptr(start, (u32*)ptr, block_len);
 		CurrentCartridge->AdvancePtr(block_len);
 		len -= block_len;
 		start += block_len;
-		SB_GDLEND += block_len;
 	}
 	SB_GDSTARD = start;
-	SB_GDST = 0;
-	asic_RaiseInterrupt(holly_GDROM_DMA);
-
-	return 0;
+	if (SB_GDLEN <= SB_GDLEND)
+	{
+		SB_GDST = 0;
+		asic_RaiseInterrupt(holly_GDROM_DMA);
+		return 0;
+	}
+	else {
+		return std::min<int>(SB_GDLEN - SB_GDLEND, 1024) * dmaXferDelay;
+	}
 }
 
 //Dma Start
@@ -157,13 +159,15 @@ static void Naomi_DmaStart(u32 addr, u32 data)
 	}
 	else if (!m3comm.DmaStart(addr, data) && CurrentCartridge != nullptr)
 	{
-		DEBUG_LOG(NAOMI, "NAOMI-DMA start addr %08X len %d", SB_GDSTAR, SB_GDLEN);
+		DEBUG_LOG(NAOMI, "NAOMI-DMA start addr %08X len %x", SB_GDSTAR, SB_GDLEN);
 		verify(1 == SB_GDDIR);
 		SB_GDST = 1;
+		SB_GDSTARD = SB_GDSTAR & 0x1FFFFFE0;
+		SB_GDLEND = 0;
 		// Max G1 bus rate: 50 MHz x 16 bits
 		// SH4_access990312_e.xls: 14.4 MB/s from GD-ROM to system RAM
-		// Here: 7 MB/s
-		sh4_sched_request(dmaSchedId, std::min<int>(SB_GDLEN * 27, SH4_MAIN_CLOCK));
+		// Here: 20 MB/s
+		sh4_sched_request(dmaSchedId, std::min<int>(SB_GDLEN, 1024) * dmaXferDelay);
 		return;
 	}
 	else
@@ -174,6 +178,15 @@ static void Naomi_DmaStart(u32 addr, u32 data)
 	asic_RaiseInterrupt(holly_GDROM_DMA);
 }
 
+void Naomi_setDmaDelay()
+{
+	if (settings.platform.isAtomiswave() || settings.content.gameId == "FORCE FIVE"
+			|| settings.content.gameId == "KENJU")
+		// 7 MB/s for Atomiwave games and conversions
+		dmaXferDelay = 27;
+	else
+		dmaXferDelay = 10;
+}
 
 static void Naomi_DmaEnable(u32 addr, u32 data)
 {
@@ -204,9 +217,18 @@ void naomi_reg_Init()
 		dmaSchedId = sh4_sched_register(0, naomiDmaSched);
 }
 
+// Sets the full content of the rom board serial eeprom (132 bytes)
+// including response to reset and read/write passwords.
 void setGameSerialId(const u8 *data)
 {
 	romSerialId.setData(data);
+}
+
+// Return the protected data from the rom board serial eeprom (112 bytes)
+// excluding response to reset and passwords.
+const u8 *getGameSerialId()
+{
+	return romSerialId.getProtectedData();
 }
 
 void naomi_reg_Term()
@@ -219,6 +241,7 @@ void naomi_reg_Term()
 	if (dmaSchedId != -1)
 		sh4_sched_unregister(dmaSchedId);
 	dmaSchedId = -1;
+	midiffb::term();
 }
 
 void naomi_reg_Reset(bool hard)
@@ -248,6 +271,7 @@ void naomi_reg_Reset(bool hard)
 	}
 	else if (multiboard != nullptr)
 		multiboard->reset();
+	midiffb::reset();
 }
 
 static u8 aw_maple_devs;
@@ -334,10 +358,14 @@ void libExtDevice_WriteMem_A0_006(u32 addr, u32 data, u32 size)
 		if ((u8)data != awDigitalOuput)
 		{
 			if (atomiswaveForceFeedback)
+			{
 				// Wheel force feedback:
 				// bit 0    direction (0 pos, 1 neg)
 				// bit 1-4  strength
 				networkOutput.output("awffb", (u8)data);
+				// This really needs to be soften
+				haptic::setTorque(0, (data & 1 ? -1.f : 1.f) * ((data >> 1) & 0xf) / 15.f * 0.5f);
+			}
 			else
 			{
 				u8 changes = data ^ awDigitalOuput;
@@ -358,8 +386,6 @@ void libExtDevice_WriteMem_A0_006(u32 addr, u32 data, u32 size)
 	INFO_LOG(NAOMI, "Unhandled write @ %x (%d): %x", addr, size, data);
 }
 
-static bool ffbCalibrating;
-
 void naomi_Serialize(Serializer& ser)
 {
 	mainSerialId.serialize(ser);
@@ -367,10 +393,8 @@ void naomi_Serialize(Serializer& ser)
 	ser << aw_maple_devs;
 	ser << coin_chute_time;
 	ser << aw_ram_test_skipped;
-	ser << midiTxBuf;
-	ser << midiTxBufIndex;
 	// TODO serialize m3comm?
-	ser << ffbCalibrating;
+	midiffb::serialize(ser);
 	sh4_sched_serialize(ser, dmaSchedId);
 }
 void naomi_Deserialize(Deserializer& deser)
@@ -409,31 +433,29 @@ void naomi_Deserialize(Deserializer& deser)
 		deser.skip<u32>(); // reg_dimm_parameterh;
 		deser.skip<u32>(); // reg_dimm_status;
 	}
-	if (deser.version() < Deserializer::V11)
-		deser.skip<u8>();
-	else if (deser.version() >= Deserializer::V14)
-		deser >> aw_maple_devs;
+	deser >> aw_maple_devs;
 	if (deser.version() >= Deserializer::V20)
 	{
 		deser >> coin_chute_time;
 		deser >> aw_ram_test_skipped;
 	}
-	if (deser.version() >= Deserializer::V27)
-	{
-		deser >> midiTxBuf;
-		deser >> midiTxBufIndex;
-	}
-	else
-	{
-		midiTxBufIndex = 0;
-	}
-	if (deser.version() >= Deserializer::V34)
-		deser >> ffbCalibrating;
-	else
-		ffbCalibrating = false;
+	midiffb::deserialize(deser);
 	if (deser.version() >= Deserializer::V45)
 		sh4_sched_deserialize(deser, dmaSchedId);
 }
+
+namespace midiffb {
+
+static bool initialized;
+static u8 midiTxBuf[4];
+static u32 midiTxBufIndex;
+static bool calibrating;
+static float damperParam;
+static float damperSpeed;
+static float power = 0.8f;
+static bool active;
+static float position = 8192.f;
+static float torque;
 
 static void midiSend(u8 b1, u8 b2, u8 b3)
 {
@@ -443,24 +465,108 @@ static void midiSend(u8 b1, u8 b2, u8 b3)
 	aica::midiSend((b1 ^ b2 ^ b3) & 0x7f);
 }
 
-static void forceFeedbackMidiReceiver(u8 data)
+// https://www.arcade-projects.com/threads/force-feedback-translator-sega-midi-sega-rs422-and-namco-rs232.924/
+static void midiReceiver(u8 data)
 {
-	static float position = 8192.f;
-	static float torque;
+	// fake position used during calibration
 	position = std::min(16383.f, std::max(0.f, position + torque));
 	if (data & 0x80)
 		midiTxBufIndex = 0;
 	midiTxBuf[midiTxBufIndex] = data;
 	if (midiTxBufIndex == 3 && ((midiTxBuf[0] ^ midiTxBuf[1] ^ midiTxBuf[2]) & 0x7f) == midiTxBuf[3])
 	{
-		if (midiTxBuf[0] == 0x84)
-			torque = ((midiTxBuf[1] << 7) | midiTxBuf[2]) - 0x80;
-		else if (midiTxBuf[0] == 0xff)
-			ffbCalibrating = true;
-		else if (midiTxBuf[0] == 0xf0)
-			ffbCalibrating = false;
+		const u8 cmd = midiTxBuf[0] & 0x7f;
+		switch (cmd)
+		{
+		case 0:
+			// FFB on/off
+			if (midiTxBuf[2] == 0)
+			{
+				active = false;
+				haptic::stopAll(0);
+				if (calibrating) {
+					calibrating = false;
+					os_notify("Calibration done", 2000);
+				}
+			}
+			else if (midiTxBuf[2] == 1) {
+				active = true;
+				haptic::setDamper(0, damperParam * power, damperSpeed);
+			}
+			break;
 
-		if (!ffbCalibrating)
+		// 01: 30 40 then 7f 40 (sgdrvsim search base pos)
+		//     30 40 (*2 initdv3e init, clubk after init)
+		//     7f 7f (kingrt init)
+		//     1f 1f kingrt test menu
+		// 02: 00 54 (sgdrvsim search base pos, kingrt)
+		//     7f 54 (*2 initdv3e init)
+		//     04 54 (clubk after init)
+
+		case 3:
+			// Drive power
+			// buf[2]? initdv3, clubk2k3: 4, kingrt: 0, sgdrvsim: 28
+			power = (midiTxBuf[1] >> 3) / 15.f;
+			break;
+		case 4:
+			// Torque
+			torque = ((midiTxBuf[1] << 7) | midiTxBuf[2]) - 0x80;
+			if (active && !calibrating)
+				haptic::setTorque(0, torque / 128.f * power);
+			break;
+		case 5:
+			// Rumble
+			// decoding from FFB Arcade Plugin (by Boomslangnz)
+			// https://github.com/Boomslangnz/FFBArcadePlugin/blob/master/Game%20Files/Demul.cpp
+			// buf[1]?
+			if (active)
+				MapleConfigMap::UpdateVibration(0, std::max(0.f, (float)(midiTxBuf[2] - 1) / 24.f * power), 0.f, 17);
+			break;
+		case 6:
+			// Damper
+			damperParam = midiTxBuf[1] / 127.f;
+			damperSpeed = midiTxBuf[2] / 127.f;
+			// clubkart sets it to 28 40 in menus, and 04 12 when in game (not changing in between)
+			// initdv3 starts with 02 2c		// FIXME no effect with sat=2
+			//	changes it in-game: 02 11-2c
+			// 	finish line(?): 02 5a
+			//	ends with 00 00
+			// kingrt66: 60 0a (start), 40 0a (in game)
+			// sgdrvsim: 08 20 when calibrating center
+			//           18 40 init
+			//           28 nn in menus (nn is viscoSpeed<<6 >>8 from table: 20,28,30,38,...,98)
+			//           1e+n 0+m in game (n and m are set in test menu, default 1e, 0))
+			//           also: 8+n 0a+m and 0+n 3c+m
+			// byte1 is effect force? byte2 speed of effect?
+			if (active && !calibrating)
+				haptic::setDamper(0, damperParam * power, damperSpeed);
+			break;
+
+		// 07 nn nn: set wheel center. n=004d 90° right, 0100 center, 011a ? left
+		// 09 00 00: kingrt init
+		//    03 40: end init
+		// 0A 10 58: kingrt end init
+		// 0B nn mm: auto center? deflection range?
+		//	sgdrvsim: 20 10 in menus, else 00 00. Also nn 7f (nn computed)
+		//    kingrt: 1b 00 end init
+		// 70 00 00: kingrt init (before 7f & 7a), kingrt test menu (after 7f)
+		// 7A 00 10,14: clubk,initv3e,kingrt init/tets menu
+		// 7C 00 3f: initdv3e init
+		//       20: clubk init
+		//       30: kingrt init
+		// 7D 00 00: nop, poll
+
+		case 0x7f:
+			// FIXME also set when entering the service menu (kingrt66)
+			os_notify("Calibrating the wheel. Keep it centered.", 10000);
+			calibrating = true;
+			haptic::setSpring(0, 0.8f, 1.f);
+			position = 8192.f;
+			break;
+		}
+
+
+		if (!calibrating)
 		{
 			int direction = -1;
 			if (NaomiGameInputs != nullptr)
@@ -471,20 +577,106 @@ static void forceFeedbackMidiReceiver(u8 data)
 		// required: b1 & 0x1f == 0x10 && b1 & 0x40 == 0
 		midiSend(0x90, ((int)position >> 7) & 0x7f, (int)position & 0x7f);
 
-		// decoding from FFB Arcade Plugin (by Boomslangnz)
-		// https://github.com/Boomslangnz/FFBArcadePlugin/blob/master/Game%20Files/Demul.cpp
-		if (midiTxBuf[0] == 0x85)
-			MapleConfigMap::UpdateVibration(0, std::max(0.f, (float)(midiTxBuf[2] - 1) / 24.f), 0.f, 5);
-		if (midiTxBuf[0] != 0xfd)
+		if (cmd != 0x7d) {
 			networkOutput.output("midiffb", (midiTxBuf[0] << 16) | (midiTxBuf[1]) << 8 | midiTxBuf[2]);
+			DEBUG_LOG(NAOMI, "midiFFB: %02x %02x %02x", cmd, midiTxBuf[1], midiTxBuf[2]);
+		}
 	}
 	midiTxBufIndex = (midiTxBufIndex + 1) % std::size(midiTxBuf);
 }
 
-void initMidiForceFeedback()
+void init()
 {
-	aica::setMidiReceiver(forceFeedbackMidiReceiver);
+	aica::setMidiReceiver(midiReceiver);
+	initialized = true;
+	reset();
 }
+
+void reset()
+{
+	active = false;
+	calibrating = false;
+	midiTxBufIndex = 0;
+	power = 0.8f;
+	damperParam = 0.f;
+	damperSpeed = 0.f;
+	torque = 0.f;
+}
+
+void term()
+{
+	aica::setMidiReceiver(nullptr);
+	initialized = false;
+}
+
+void serialize(Serializer& ser)
+{
+	if (initialized)
+	{
+		ser << midiTxBuf;
+		ser << midiTxBufIndex;
+		ser << calibrating;
+		ser << active;
+		ser << power;
+		ser << damperParam;
+		ser << damperSpeed;
+		ser << position;
+		ser << torque;
+	}
+}
+
+void deserialize(Deserializer& deser)
+{
+	if (deser.version() >= Deserializer::V27)
+	{
+		if (initialized) {
+			deser >> midiTxBuf;
+			deser >> midiTxBufIndex;
+		}
+		else if (deser.version() < Deserializer::V51) {
+			deser.skip(4);		// midiTxBuf
+			deser.skip<u32>();	// midiTxBufIndex
+		}
+	}
+	else {
+		midiTxBufIndex = 0;
+	}
+	if (deser.version() >= Deserializer::V34)
+	{
+		if (initialized)
+			deser >> calibrating;
+		else if (deser.version() < Deserializer::V51)
+			deser.skip<bool>();	// calibrating
+	}
+	else {
+		calibrating = false;
+	}
+	if (initialized)
+	{
+		if (deser.version() >= Deserializer::V51)
+		{
+			deser >> active;
+			deser >> power;
+			deser >> damperParam;
+			deser >> damperSpeed;
+			deser >> position;
+			deser >> torque;
+			if (active && !calibrating)
+				haptic::setDamper(0, damperParam * power, damperSpeed);
+		}
+		else
+		{
+			active = false;
+			power = 0.8f;
+			damperParam = 0.f;
+			damperSpeed = 0.f;
+			position = 8192.f;
+			torque = 0.f;
+		}
+	}
+}
+
+}	// namespace midiffb
 
 struct DriveSimPipe : public SerialPort::Pipe
 {
@@ -515,7 +707,7 @@ struct DriveSimPipe : public SerialPort::Pipe
 				{
 					char message[16];
 					sprintf(message, "Speed: %3d", speed);
-					gui_display_notification(message, 1000);
+					os_notify(message, 1000);
 				}
 			}
 			buffer.clear();

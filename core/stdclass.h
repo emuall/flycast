@@ -9,6 +9,9 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <functional>
+#include <cassert>
+#include <time.h>
 
 #ifdef __ANDROID__
 #include <sys/mman.h>
@@ -28,12 +31,13 @@ private:
 	typedef void* ThreadEntryFP(void* param);
 	ThreadEntryFP* entry;
 	void* param;
+	const char *name;
 
 public:
 	std::thread thread;
 
-	cThread(ThreadEntryFP* function, void* param)
-		:entry(function), param(param) {}
+	cThread(ThreadEntryFP* function, void* param, const char *name)
+		:entry(function), param(param), name(name) {}
 	~cThread() { WaitToEnd(); }
 	void Start();
 	void WaitToEnd();
@@ -195,4 +199,43 @@ public:
 		MD5_Final(v.data(), &ctx);
 		return v;
 	}
+};
+
+u64 getTimeMs();
+std::string timeToISO8601(time_t time);
+
+class ThreadRunner
+{
+public:
+	void init() {
+		threadId = std::this_thread::get_id();
+	}
+	void runOnThread(std::function<void()> func)
+	{
+		if (threadId == std::this_thread::get_id()) {
+			func();
+		}
+		else {
+			LockGuard _(mutex);
+			tasks.push_back(func);
+		}
+	}
+	void execTasks()
+	{
+		assert(threadId == std::this_thread::get_id());
+		std::vector<std::function<void()>> localTasks;
+		{
+			LockGuard _(mutex);
+			std::swap(localTasks, tasks);
+		}
+		for (auto& func : localTasks)
+			func();
+	}
+
+private:
+	using LockGuard = std::lock_guard<std::mutex>;
+
+	std::thread::id threadId;
+	std::vector<std::function<void()>> tasks;
+	std::mutex mutex;
 };

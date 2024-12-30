@@ -22,11 +22,12 @@
 #include "vulkan.h"
 #include "vmallocator.h"
 #include "quad.h"
-#include "rend/TexCache.h"
+#include "rend/texconv.h"
 #include "libretro_vulkan.h"
 #include "wsi/context.h"
 #include "commandpool.h"
 #include "overlay.h"
+#include <vector>
 
 static vk::Format findDepthFormat(vk::PhysicalDevice physicalDevice);
 
@@ -43,6 +44,7 @@ public:
 
 	u32 GetGraphicsQueueFamilyIndex() const { return retro_render_if->queue_index; }
 	void PresentFrame(vk::Image image, vk::ImageView imageView, const vk::Extent2D& extent, float aspectRatio);
+	bool GetLastFrame(std::vector<u8>& data, int& width, int& height) { return false; }
 
 	vk::PhysicalDevice GetPhysicalDevice() const { return physicalDevice; }
 	vk::Device GetDevice() const { return device; }
@@ -89,6 +91,8 @@ public:
 	static VulkanContext *Instance() { return contextInstance; }
 	bool SupportsSamplerAnisotropy() const { return samplerAnisotropy; }
 	bool SupportsDedicatedAllocation() const { return dedicatedAllocationSupported; }
+	bool hasPerPixel() override { return fragmentStoresAndAtomics; }
+	bool hasProvokingVertex() { return provokingVertexSupported; }
 	const VMAllocator& GetAllocator() const { return allocator; }
 	vk::DeviceSize GetMaxMemoryAllocationSize() const { return maxMemoryAllocationSize; }
 	f32 GetMaxSamplerAnisotropy() const { return samplerAnisotropy ? maxSamplerAnisotropy : 1.f; }
@@ -97,7 +101,10 @@ public:
 		commandPool.addToFlight(object);
 	}
 #ifdef VK_DEBUG
-	void setObjectName(VkHandle object, vk::ObjectType objectType, const std::string& name) {}
+	template<typename HandleType, typename = std::enable_if_t<vk::isVulkanHandleType<HandleType>::value>>
+	void setObjectName(const HandleType& object, const std::string& name)
+	{
+	}
 #endif
 
 	constexpr static int VENDOR_AMD = 0x1022;
@@ -123,9 +130,11 @@ private:
 	bool optimalTilingSupported1555 = false;
 	bool optimalTilingSupported4444 = false;
 public:
+	bool fragmentStoresAndAtomics = false;
 	bool samplerAnisotropy = false;
 	f32 maxSamplerAnisotropy = 0.f;
 	bool dedicatedAllocationSupported = false;
+	bool provokingVertexSupported = false;
 private:
 	u32 vendorID = 0;
 

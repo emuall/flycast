@@ -22,15 +22,16 @@
 
 vk::UniqueRenderPass RenderPasses::MakeRenderPass(bool initial, bool last, bool loadClear)
 {
+	vk::AttachmentDescription attach0 = GetAttachment0Description(initial, last, loadClear);
     std::array<vk::AttachmentDescription, 4> attachmentDescriptions = {
     		// Swap chain image
-    		GetAttachment0Description(initial, last, loadClear),
+    		attach0,
 			// OP+PT color attachment
 			vk::AttachmentDescription(vk::AttachmentDescriptionFlags(), vk::Format::eR8G8B8A8Unorm, vk::SampleCountFlagBits::e1,
-					initial ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
+					loadClear && initial ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
 					last ? vk::AttachmentStoreOp::eDontCare : vk::AttachmentStoreOp::eStore,
 					vk::AttachmentLoadOp::eDontCare, vk::AttachmentStoreOp::eDontCare,
-					initial ? vk::ImageLayout::eUndefined : vk::ImageLayout::eShaderReadOnlyOptimal, vk::ImageLayout::eShaderReadOnlyOptimal),
+					loadClear && initial ? vk::ImageLayout::eUndefined : attach0.finalLayout, attach0.finalLayout), // initial layout is eUndefined for rtt, so use final layout instead
 			// OP+PT depth attachment
 			vk::AttachmentDescription(vk::AttachmentDescriptionFlags(), GetContext()->GetDepthFormat(), vk::SampleCountFlagBits::e1,
 					initial ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
@@ -87,6 +88,10 @@ vk::UniqueRenderPass RenderPasses::MakeRenderPass(bool initial, bool last, bool 
     		vk::PipelineStageFlagBits::eEarlyFragmentTests | vk::PipelineStageFlagBits::eLateFragmentTests,
     		vk::AccessFlagBits::eInputAttachmentRead | vk::AccessFlagBits::eShaderRead,
 			vk::AccessFlagBits::eDepthStencilAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentWrite,
+			vk::DependencyFlagBits::eByRegion);
+    dependencies.emplace_back(1, 1, vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eFragmentShader,
+    		vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+			vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
 			vk::DependencyFlagBits::eByRegion);
     dependencies.emplace_back(2, 2, vk::PipelineStageFlagBits::eFragmentShader, vk::PipelineStageFlagBits::eFragmentShader,
     		vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,

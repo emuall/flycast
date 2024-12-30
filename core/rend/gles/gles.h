@@ -7,7 +7,7 @@
 #include "glcache.h"
 #include "rend/shader_util.h"
 #ifndef LIBRETRO
-#include "rend/imgui_driver.h"
+#include "ui/imgui_driver.h"
 #endif
 
 #include <unordered_map>
@@ -223,11 +223,7 @@ protected:
 	void defineVtxAttribs() override;
 };
 
-class OSDVertexArray final : public GlVertexArray
-{
-protected:
-	void defineVtxAttribs() override;
-};
+class GlQuadDrawer;
 
 struct gl_ctx
 {
@@ -253,15 +249,6 @@ struct gl_ctx
 	} n2ModVolShader;
 
 	std::unordered_map<u32, PipelineShader> shaders;
-
-	struct
-	{
-		GLuint program;
-		GLint scale;
-		OSDVertexArray vao;
-		std::unique_ptr<GlBuffer> geometry;
-		GLuint osd_tex;
-	} OSD_SHADER;
 
 	struct
 	{
@@ -308,6 +295,7 @@ struct gl_ctx
 		std::unique_ptr<GlFramebuffer> framebuffer;
 	} videorouting;
 
+	std::unique_ptr<GlQuadDrawer> quad;
 	const char *gl_version;
 	const char *glsl_version_header;
 	int gl_major;
@@ -323,6 +311,7 @@ struct gl_ctx
 	bool border_clamp_supported;
 	bool prim_restart_supported;
 	bool prim_restart_fixed_supported;
+	bool bogusBlitFramebuffer;
 
 	size_t get_index_size() { return index_type == GL_UNSIGNED_INT ? sizeof(u32) : sizeof(u16); }
 };
@@ -513,20 +502,21 @@ struct OpenGLRenderer : Renderer
 
 	bool RenderLastFrame() override
 	{
+		if (clearLastFrame)
+			return false;
 		saveCurrentFramebuffer();
 		bool ret = renderLastFrame();
 		restoreCurrentFramebuffer();
 
 		return ret;
 	}
-
-	void DrawOSD(bool clear_screen) override;
+	bool GetLastFrame(std::vector<u8>& data, int& width, int& height) override;
 
 	BaseTextureCacheData *GetTexture(TSP tsp, TCW tcw) override;
 
 	bool Present() override
 	{
-		if (!frameRendered)
+		if (!frameRendered || clearLastFrame)
 			return false;
 #ifndef LIBRETRO
 		imguiDriver->setFrameRendered();
@@ -557,6 +547,7 @@ protected:
 
 	bool renderLastFrame();
 	void renderVideoRouting();
+	void drawOSD();
 
 private:
 	bool renderFrame(int width, int height);
@@ -567,10 +558,6 @@ protected:
 	int height = 480;
 	void initVideoRoutingFrameBuffer();
 };
-
-void initQuad();
-void termQuad();
-void drawQuad(GLuint texId, bool rotate = false, bool swapY = false, float *coords = nullptr);
 
 extern const char* ShaderCompatSource;
 extern const char *VertexCompatShader;
@@ -585,7 +572,9 @@ public:
 	}
 };
 
+void drawVmusAndCrosshairs(int width, int height);
+void termVmuLightgun();
+
 #ifdef LIBRETRO
 extern "C" struct retro_hw_render_callback hw_render;
-void termVmuLightgun();
 #endif

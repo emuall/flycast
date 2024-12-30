@@ -20,17 +20,17 @@
 #import "EmulatorView.h"
 
 #include "types.h"
-#include "rend/gui.h"
+#include "ui/gui.h"
 #include "ios_gamepad.h"
 
 @implementation EmulatorView {
-	std::shared_ptr<IOSTouchMouse> mouse;
+	std::shared_ptr<TouchMouse> mouse;
 }
 
 - (void)didMoveToSuperview
 {
 	[super didMoveToSuperview];
-	mouse = std::make_shared<IOSTouchMouse>();
+	mouse = std::make_shared<TouchMouse>();
 	GamepadDevice::Register(mouse);
 }
 
@@ -45,8 +45,7 @@
 {
 	UITouch *touch = [touches anyObject];
 	[self touchLocation:touch];
-	if (gui_is_open())
-		mouse->setButton(Mouse::LEFT_BUTTON, true);
+	mouse->setButton(Mouse::LEFT_BUTTON, true);
 	[super touchesBegan:touches withEvent:event];
 }
 
@@ -54,8 +53,7 @@
 {
 	UITouch *touch = [touches anyObject];
 	[self touchLocation:touch];
-	if (gui_is_open())
-		mouse->setButton(Mouse::LEFT_BUTTON, false);
+	mouse->setButton(Mouse::LEFT_BUTTON, false);
 	[super touchesEnded:touches withEvent:event];
 }
 

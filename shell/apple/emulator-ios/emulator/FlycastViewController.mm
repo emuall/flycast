@@ -29,11 +29,12 @@
 #import <dlfcn.h>
 
 #import "PadViewController.h"
+#import "EditPadViewController.h"
 #import "EmulatorView.h"
 
 #include "types.h"
 #include "wsi/context.h"
-#include "rend/mainui.h"
+#include "ui/mainui.h"
 #include "emulator.h"
 #include "log/LogManager.h"
 #include "stdclass.h"
@@ -43,7 +44,6 @@
 #include "ios_mouse.h"
 #include "oslib/oslib.h"
 
-//@import AltKit;
 #import "AltKit-Swift.h"
 
 static std::string iosJitStatus;
@@ -53,8 +53,6 @@ static __unsafe_unretained FlycastViewController *flycastViewController;
 std::map<GCController *, std::shared_ptr<IOSGamepad>> IOSGamepad::controllers;
 std::map<GCKeyboard *, std::shared_ptr<IOSKeyboard>> IOSKeyboard::keyboards;
 std::map<GCMouse *, std::shared_ptr<IOSMouse>> IOSMouse::mice;
-
-void common_linux_setup();
 
 static bool lockedPointer;
 static void updatePointerLock(Event event, void *)
@@ -94,6 +92,7 @@ static void updateAudioSession(Event event, void *)
 			switch (config::MapleMainDevices[bus])
 			{
 				case MDT_SegaController:
+				case MDT_SegaControllerXL:
 					for (int port = 0; port < 2; port++)
 						if (config::MapleExpansionDevices[bus][port] == MDT_Microphone)
 							hasMicrophone = true;
@@ -101,6 +100,7 @@ static void updateAudioSession(Event event, void *)
 				case MDT_LightGun:
 				case MDT_AsciiStick:
 				case MDT_TwinStick:
+				case MDT_RacingController:
 					if (config::MapleExpansionDevices[bus][0] == MDT_Microphone)
 						hasMicrophone = true;
 					break;
@@ -149,6 +149,7 @@ static void updateAudioSession(Event event, void *)
 
 @property (strong, nonatomic) EAGLContext *context;
 @property (strong, nonatomic) PadViewController *padController;
+@property (strong, nonatomic) EditPadViewController *editPadController;
 
 @property (nonatomic) iCadeReaderView* iCadeReader;
 @property (nonatomic, strong) id gamePadConnectObserver;
@@ -210,7 +211,7 @@ static void updateAudioSession(Event event, void *)
 	}
 #endif
 
-	common_linux_setup();
+	os_InstallFaultHandler();
 
 	flycast_init(0, nullptr);
 	config::ContentPath.get().clear();
@@ -218,6 +219,7 @@ static void updateAudioSession(Event event, void *)
 
 #if !TARGET_OS_TV
 	self.padController = [[PadViewController alloc] initWithNibName:@"PadViewController" bundle:nil];
+	self.editPadController = [[EditPadViewController alloc] initWithNibName:@"EditPadViewController" bundle:nil];
 #endif
 	
     self.context = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES3];
@@ -296,6 +298,12 @@ static void updateAudioSession(Event event, void *)
 	self.padController.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 	if (IOSGamepad::controllerConnected())
 		[self.padController hideController];
+
+	[self addChildViewController:self.editPadController];
+	self.editPadController.view.frame = self.view.bounds;
+	self.editPadController.view.translatesAutoresizingMaskIntoConstraints = YES;
+	self.editPadController.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	[self.editPadController hideController];
 #endif
 
     self.iCadeReader = [[iCadeReaderView alloc] init];
@@ -692,6 +700,20 @@ bool checkTryDebug()
 #endif
 	mainui_rend_frame();
 }
+
+- (void)setVGamepadEditMode:(BOOL)editing
+{
+#if !TARGET_OS_TV
+	if (editing != [self.editPadController isControllerVisible])
+	{
+		if (editing)
+			[self.editPadController showController:self.view];
+		else
+			[self.editPadController hideController];
+	}
+#endif
+}
+
 /*
 - (void)pickIosFile
 {
@@ -738,11 +760,20 @@ void pickIosFile()
 
 const char *getIosJitStatus()
 {
-	static double lastCheckTime;
-	if (!iosJitAuthorized && os_GetSeconds() - lastCheckTime > 10.0)
+	static u64 lastCheckTime;
+	if (!iosJitAuthorized && getTimeMs() - lastCheckTime > 10000)
 	{
 		[flycastViewController altKitStart];
-		lastCheckTime = os_GetSeconds();
+		lastCheckTime = getTimeMs();
 	}
 	return iosJitStatus.c_str();
+}
+
+namespace vgamepad
+{
+
+void setEditMode(bool editing) {
+	[flycastViewController setVGamepadEditMode:editing];
+}
+
 }

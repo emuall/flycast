@@ -41,10 +41,9 @@ public:
 	bool Draw(const Texture *fogTexture, const Texture *paletteTexture);
 
 	virtual vk::CommandBuffer NewFrame() = 0;
-	virtual void EndFrame() {  renderPass++; };
+	virtual void EndFrame() = 0;
 
 protected:
-	u32 GetSwapChainSize() { return 2; }
 	void Init(SamplerManager *samplerManager, OITPipelineManager *pipelineManager, OITBuffers *oitBuffers)
 	{
 		this->pipelineManager = pipelineManager;
@@ -73,48 +72,28 @@ protected:
 		maxHeight = 0;
 	}
 
-	int GetCurrentImage() const { return imageIndex; }
-
-	void NewImage()
-	{
+	void NewImage() {
 		descriptorSets.nextFrame();
-		imageIndex = (imageIndex + 1) % GetSwapChainSize();
-		renderPass = 0;
 	}
 
-	BufferData* GetMainBuffer(u32 size)
-	{
-		u32 bufferIndex = imageIndex + renderPass * GetSwapChainSize();
-		while (mainBuffers.size() <= bufferIndex)
-		{
-			mainBuffers.push_back(std::make_unique<BufferData>(std::max(512 * 1024u, size),
-					vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eUniformBuffer
-					| vk::BufferUsageFlagBits::eStorageBuffer));
-		}
-		if (mainBuffers[bufferIndex]->bufferSize < size)
-		{
-			u32 newSize = (u32)mainBuffers[bufferIndex]->bufferSize;
-			while (newSize < size)
-				newSize *= 2;
-			INFO_LOG(RENDERER, "Increasing main buffer size %d -> %d", (u32)mainBuffers[bufferIndex]->bufferSize, newSize);
-			// FIXME vf4evob still complains about buffer in use after 2 frames! due to swap chain size of 3
-			// even releasing using the vk context doesn't work
-			commandPool->addToFlight(new Deleter(mainBuffers[bufferIndex].release()));
-			mainBuffers[bufferIndex] = std::make_unique<BufferData>(newSize,
-					vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eUniformBuffer
-					| vk::BufferUsageFlagBits::eStorageBuffer);
-		}
-		return mainBuffers[bufferIndex].get();
+	BufferData* GetMainBuffer(u32 size) {
+		return BaseDrawer::GetMainBuffer(size, vk::BufferUsageFlagBits::eStorageBuffer);
 	}
 
-	void MakeBuffers(int width, int height);
-	virtual vk::Framebuffer GetFinalFramebuffer() const = 0;
+	void MakeBuffers(int width, int height, vk::ImageUsageFlags colorUsage = {});
+	virtual vk::Framebuffer getFramebuffer(int renderPass, int renderPassCount) = 0;
+	int getFramebufferIndex() { return framebufferIndex; }
+	virtual vk::ImageLayout getAttachmentInitialLayout() = 0;
 
 	vk::Rect2D viewport;
 	std::array<std::unique_ptr<FramebufferAttachment>, 2> colorAttachments;
 	std::array<std::unique_ptr<FramebufferAttachment>, 2> depthAttachments;
+	std::array<vk::UniqueFramebuffer, 2> tempFramebuffers;
 	vk::CommandBuffer currentCommandBuffer;
 	std::vector<bool> clearNeeded;
+	int maxWidth = 0;
+	int maxHeight = 0;
+	int framebufferIndex = 0;
 
 private:
 	void DrawPoly(const vk::CommandBuffer& cmdBuffer, u32 listType, bool autosort, Pass pass,
@@ -143,19 +122,14 @@ private:
 
 	std::unique_ptr<QuadBuffer> quadBuffer;
 
-	std::array<vk::UniqueFramebuffer, 2> tempFramebuffers;
-
 	OITPipelineManager *pipelineManager = nullptr;
 	SamplerManager *samplerManager = nullptr;
 	OITBuffers *oitBuffers = nullptr;
-	int maxWidth = 0;
-	int maxHeight = 0;
 	bool needAttachmentTransition = false;
-	int imageIndex = 0;
-	int renderPass = 0;
 	OITDescriptorSets descriptorSets;
-	std::vector<std::unique_ptr<BufferData>> mainBuffers;
+	vk::Buffer curMainBuffer;
 	bool dithering = false;
+	vk::ImageUsageFlags currentBufferUsage {};
 };
 
 class OITScreenDrawer : public OITDrawer
@@ -164,9 +138,11 @@ public:
 	void Init(SamplerManager *samplerManager, OITShaderManager *shaderManager, OITBuffers *oitBuffers,
 			const vk::Extent2D& viewport)
 	{
-		if (!screenPipelineManager)
+		emulateFramebuffer = config::EmulateFramebuffer;
+		if (!screenPipelineManager) {
 			screenPipelineManager = std::make_unique<OITPipelineManager>();
-		screenPipelineManager->Init(shaderManager, oitBuffers);
+			screenPipelineManager->Init(shaderManager, oitBuffers);
+		}
 		OITDrawer::Init(samplerManager, screenPipelineManager.get(), oitBuffers);
 
 		MakeFramebuffers(viewport);
@@ -175,8 +151,6 @@ public:
 	void Term()
 	{
 		screenPipelineManager.reset();
-		framebuffers.clear();
-		finalColorAttachments.clear();
 		OITDrawer::Term();
 	}
 
@@ -184,10 +158,11 @@ public:
 
 	void EndFrame() override
 	{
-		currentCommandBuffer.endRenderPass();
-		if (config::EmulateFramebuffer)
-		{
-			scaleAndWriteFramebuffer(currentCommandBuffer, finalColorAttachments[GetCurrentImage()].get());
+		if (!frameStarted)
+			return;
+		frameStarted = false;
+		if (emulateFramebuffer) {
+			scaleAndWriteFramebuffer(currentCommandBuffer, colorAttachments[framebufferIndex].get());
 		}
 		else
 		{
@@ -196,17 +171,17 @@ public:
 			aspectRatio = getOutputFramebufferAspectRatio();
 		}
 		currentCommandBuffer = nullptr;
-		OITDrawer::EndFrame();
 		frameRendered = true;
 	}
 
 	bool PresentFrame()
 	{
+		EndFrame();
 		if (!frameRendered)
 			return false;
 		frameRendered = false;
-		GetContext()->PresentFrame(finalColorAttachments[GetCurrentImage()]->GetImage(),
-				finalColorAttachments[GetCurrentImage()]->GetImageView(), viewport.extent, aspectRatio);
+		GetContext()->PresentFrame(colorAttachments[framebufferIndex]->GetImage(),
+				colorAttachments[framebufferIndex]->GetImageView(), viewport.extent, aspectRatio);
 
 		return true;
 	}
@@ -214,17 +189,19 @@ public:
 	vk::CommandBuffer GetCurrentCommandBuffer() const { return currentCommandBuffer; }
 
 protected:
-	vk::Framebuffer GetFinalFramebuffer() const override { return *framebuffers[GetCurrentImage()]; }
+	vk::Framebuffer getFramebuffer(int renderPass, int renderPassCount) override;
+	vk::ImageLayout getAttachmentInitialLayout() override {
+		return emulateFramebuffer ? vk::ImageLayout::eTransferSrcOptimal : vk::ImageLayout::eShaderReadOnlyOptimal;
+	}
 
 private:
 	void MakeFramebuffers(const vk::Extent2D& viewport);
 
-	std::vector<std::unique_ptr<FramebufferAttachment>> finalColorAttachments;
-	std::vector<vk::UniqueFramebuffer> framebuffers;
 	std::unique_ptr<OITPipelineManager> screenPipelineManager;
-	std::vector<bool> transitionNeeded;
 	bool frameRendered = false;
 	float aspectRatio = 0.f;
+	bool frameStarted = false;
+	bool emulateFramebuffer = false;
 };
 
 class OITTextureDrawer : public OITDrawer
@@ -242,8 +219,8 @@ public:
 	}
 	void Term()
 	{
+		framebuffer.reset();
 		colorAttachment.reset();
-		framebuffers.clear();
 		rttPipelineManager.reset();
 		OITDrawer::Term();
 	}
@@ -252,7 +229,10 @@ public:
 
 protected:
 	vk::CommandBuffer NewFrame() override;
-	vk::Framebuffer GetFinalFramebuffer() const override { return *framebuffers[GetCurrentImage()]; }
+	vk::Framebuffer getFramebuffer(int renderPass, int renderPassCount) override;
+	vk::ImageLayout getAttachmentInitialLayout() override {
+		return config::RenderToTextureBuffer ? vk::ImageLayout::eTransferSrcOptimal : vk::ImageLayout::eShaderReadOnlyOptimal;
+	}
 
 private:
 	u32 textureAddr = 0;
@@ -260,8 +240,8 @@ private:
 	Texture *texture = nullptr;
 	vk::Image colorImage;
 	std::unique_ptr<FramebufferAttachment> colorAttachment;
-	std::vector<vk::UniqueFramebuffer> framebuffers;
 	std::unique_ptr<RttOITPipelineManager> rttPipelineManager;
+	vk::UniqueFramebuffer framebuffer;
 
 	TextureCache *textureCache = nullptr;
 };

@@ -95,9 +95,6 @@ static void dec_End(u32 dst, BlockEndType flags, bool delaySlot)
 		verify(state.JumpAddr != NullAddress);
 }
 
-#define SR_STATUS_MASK STATUS_MASK
-#define SR_T_MASK 1
-
 static u32 dec_jump_simm8(u32 op)
 {
 	return state.cpu.rpc + GetSImm8(op)*2 + 4;
@@ -114,8 +111,8 @@ static u32 dec_set_pr()
 }
 static void dec_write_sr(shil_param src)
 {
-	Emit(shop_and,mk_reg(reg_sr_status),src,mk_imm(SR_STATUS_MASK));
-	Emit(shop_and,mk_reg(reg_sr_T),src,mk_imm(SR_T_MASK));
+	Emit(shop_and, mk_reg(reg_sr_status), src, mk_imm(sr_t::MASK));
+	Emit(shop_and, mk_reg(reg_sr_T), src, mk_imm(1));
 }
 //bf <bdisp8>
 sh4dec(i1000_1011_iiii_iiii)
@@ -508,6 +505,8 @@ static void dec_param(DecParam p,shil_param& r1,shil_param& r2, u32 op)
 			u32 shft=p-PRM_RN_D4_x1;
 			r1=mk_regi(reg_r0+GetN(op));
 			r2=mk_imm(GetImm4(op)<<shft);
+			if (r2.imm_value() == 0)
+				r2 = shil_param();
 		}
 		break;
 
@@ -523,6 +522,8 @@ static void dec_param(DecParam p,shil_param& r1,shil_param& r2, u32 op)
 			u32 shft=p-PRM_RM_D4_x1;
 			r1=mk_regi(reg_r0+GetM(op));
 			r2=mk_imm(GetImm4(op)<<shft);
+			if (r2.imm_value() == 0)
+				r2 = shil_param();
 		}
 		break;
 
@@ -538,6 +539,8 @@ static void dec_param(DecParam p,shil_param& r1,shil_param& r2, u32 op)
 			u32 shft=p-PRM_GBR_D8_x1;
 			r1=mk_regi(reg_gbr);
 			r2=mk_imm(GetImm8(op)<<shft);
+			if (r2.imm_value() == 0)
+				r2 = shil_param();
 		}
 		break;
 
@@ -979,13 +982,13 @@ bool dec_DecodeBlock(RuntimeBlockInfo* rbi,u32 max_cycles)
 					blk->guest_opcodes++;
 					dec_updateBlockCycles(blk, op);
 
-					if (OpDesc[op]->IsFloatingPoint())
+					if (!blk->has_fpu_op && OpDesc[op]->IsFloatingPoint())
 					{
-						if (sr.FD == 1)
+						if (Sh4cntx.sr.FD == 1)
 						{
 							// We need to know FPSCR to compile the block, so let the exception handler run first
 							// as it may change the fp registers
-							Do_Exception(next_pc, Sh4Ex_FpuDisabled);
+							Do_Exception(Sh4cntx.pc, Sh4Ex_FpuDisabled);
 							return false;
 						}
 						blk->has_fpu_op = true;

@@ -19,8 +19,8 @@
 
 #include "gamepad_device.h"
 #include "cfg/cfg.h"
-#include "oslib/oslib.h"
-#include "rend/gui.h"
+#include "stdclass.h"
+#include "ui/gui.h"
 #include "emulator.h"
 #include "hw/maple/maple_devs.h"
 #include "mouse.h"
@@ -99,6 +99,10 @@ bool GamepadDevice::handleButtonInput(int port, DreamcastKey key, bool pressed)
 			if (pressed)
 				gui_saveState();
 			break;
+		case EMU_BTN_SCREENSHOT:
+			if (pressed)
+				gui_takeScreenshot();
+			break;
 		case DC_AXIS_LT:
 			if (port >= 0)
 				lt[port] = pressed ? 0xffff : 0;
@@ -152,7 +156,7 @@ bool GamepadDevice::handleButtonInput(int port, DreamcastKey key, bool pressed)
 bool GamepadDevice::gamepad_btn_input(u32 code, bool pressed)
 {
 	if (_input_detected != nullptr && _detecting_button
-			&& os_GetSeconds() >= _detection_start_time && pressed)
+			&& getTimeMs() >= _detection_start_time && pressed)
 	{
 		_input_detected(code, false, false);
 		_input_detected = nullptr;
@@ -207,7 +211,7 @@ bool GamepadDevice::gamepad_axis_input(u32 code, int value)
 {
 	bool positive = value >= 0;
 	if (_input_detected != NULL && _detecting_axis
-			&& os_GetSeconds() >= _detection_start_time && std::abs(value) >= 16384)
+			&& getTimeMs() >= _detection_start_time && std::abs(value) >= 16384)
 	{
 		_input_detected(code, true, positive);
 		_input_detected = nullptr;
@@ -443,24 +447,18 @@ bool GamepadDevice::find_mapping(int system /* = settings.platform.system */)
 	return false;
 }
 
-int GamepadDevice::GetGamepadCount()
-{
-	_gamepads_mutex.lock();
-	int count = _gamepads.size();
-	_gamepads_mutex.unlock();
-	return count;
+int GamepadDevice::GetGamepadCount() {
+	Lock _(_gamepads_mutex);
+	return _gamepads.size();
 }
 
 std::shared_ptr<GamepadDevice> GamepadDevice::GetGamepad(int index)
 {
-	_gamepads_mutex.lock();
-	std::shared_ptr<GamepadDevice> dev;
+	Lock _(_gamepads_mutex);
 	if (index >= 0 && index < (int)_gamepads.size())
-		dev = _gamepads[index];
+		return _gamepads[index];
 	else
-		dev = NULL;
-	_gamepads_mutex.unlock();
-	return dev;
+		return nullptr;
 }
 
 void GamepadDevice::save_mapping(int system /* = settings.platform.system */)
@@ -505,7 +503,7 @@ void GamepadDevice::detect_btn_input(input_detected_cb button_pressed)
 	_input_detected = button_pressed;
 	_detecting_button = true;
 	_detecting_axis = false;
-	_detection_start_time = os_GetSeconds() + 0.2;
+	_detection_start_time = getTimeMs() + 200;
 }
 
 void GamepadDevice::detect_axis_input(input_detected_cb axis_moved)
@@ -513,7 +511,7 @@ void GamepadDevice::detect_axis_input(input_detected_cb axis_moved)
 	_input_detected = axis_moved;
 	_detecting_button = false;
 	_detecting_axis = true;
-	_detection_start_time = os_GetSeconds() + 0.2;
+	_detection_start_time = getTimeMs() + 200;
 }
 
 void GamepadDevice::detectButtonOrAxisInput(input_detected_cb input_changed)
@@ -521,7 +519,7 @@ void GamepadDevice::detectButtonOrAxisInput(input_detected_cb input_changed)
 	_input_detected = input_changed;
 	_detecting_button = true;
 	_detecting_axis = true;
-	_detection_start_time = os_GetSeconds() + 0.2;
+	_detection_start_time = getTimeMs() + 200;
 }
 
 #ifdef TEST_AUTOMATION
@@ -553,21 +551,19 @@ void GamepadDevice::Register(const std::shared_ptr<GamepadDevice>& gamepad)
 			setbuf(record_input, NULL);
 	}
 #endif
-	_gamepads_mutex.lock();
+	Lock _(_gamepads_mutex);
 	_gamepads.push_back(gamepad);
-	_gamepads_mutex.unlock();
 	MapleConfigMap::UpdateVibration = updateVibration;
 }
 
 void GamepadDevice::Unregister(const std::shared_ptr<GamepadDevice>& gamepad)
 {
-	_gamepads_mutex.lock();
+	Lock _(_gamepads_mutex);
 	for (auto it = _gamepads.begin(); it != _gamepads.end(); it++)
 		if (*it == gamepad) {
 			_gamepads.erase(it);
 			break;
 		}
-	_gamepads_mutex.unlock();
 }
 
 void GamepadDevice::SaveMaplePorts()
@@ -578,6 +574,83 @@ void GamepadDevice::SaveMaplePorts()
 		if (gamepad != NULL && !gamepad->unique_id().empty())
 			cfgSaveInt("input", MAPLE_PORT_CFG_PREFIX + gamepad->unique_id(), gamepad->maple_port());
 	}
+}
+
+s16 (&GamepadDevice::getTargetArray(DigAnalog axis))[4]
+{
+	switch (axis)
+	{
+	case DIGANA_LEFT:
+	case DIGANA_RIGHT:
+		return joyx;
+	case DIGANA_UP:;
+	case DIGANA_DOWN:
+		return joyy;
+	case DIGANA2_LEFT:
+	case DIGANA2_RIGHT:
+		return joyrx;
+	case DIGANA2_UP:
+	case DIGANA2_DOWN:
+		return joyry;
+	case DIGANA3_LEFT:
+	case DIGANA3_RIGHT:
+		return joy3x;
+	case DIGANA3_UP:
+	case DIGANA3_DOWN:
+		return joy3y;
+	default:
+		die("unknown axis");
+	}
+}
+
+void GamepadDevice::rampAnalog()
+{
+	Lock _(rampMutex);
+	if (lastAnalogUpdate == 0)
+		// also used as a flag that no analog ramping is needed on this device (yet)
+		return;
+
+	const u64 now = getTimeMs();
+	const int delta = std::round(static_cast<float>(now - lastAnalogUpdate) * AnalogRamp);
+	lastAnalogUpdate = now;
+	for (unsigned port = 0; port < std::size(digitalToAnalogState); port++)
+	{
+		for (int axis = 0; axis < 12; axis += 2)	// 3 sticks with 2 axes each
+		{
+			DigAnalog negDir = static_cast<DigAnalog>(1 << axis);
+			if ((rampAnalogState[port] & negDir) == 0)
+				// axis not active
+				continue;
+			DigAnalog posDir = static_cast<DigAnalog>(1 << (axis + 1));
+			const int socd = digitalToAnalogState[port] & (negDir | posDir);
+			s16& axisValue = getTargetArray(negDir)[port];
+			if (socd != 0 && socd != (negDir | posDir))
+			{
+				// One axis is pressed => ramp up
+				if (socd == posDir)
+					axisValue = std::min(32767, axisValue + delta);
+				else
+					axisValue = std::max(-32768, axisValue - delta);
+			}
+			else
+			{
+				// No axis is pressed (or both) => ramp down
+				if (axisValue > 0)
+					axisValue = std::max(0, axisValue - delta);
+				else if (axisValue < 0)
+					axisValue = std::min(0, axisValue + delta);
+				else
+					rampAnalogState[port] &= ~negDir;
+			}
+		}
+	}
+}
+
+void GamepadDevice::RampAnalog()
+{
+	Lock _(_gamepads_mutex);
+	for (auto& gamepad : _gamepads)
+		gamepad->rampAnalog();
 }
 
 #ifdef TEST_AUTOMATION

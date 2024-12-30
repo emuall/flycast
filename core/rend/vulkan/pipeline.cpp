@@ -20,7 +20,6 @@
 */
 #include "pipeline.h"
 #include "hw/pvr/Renderer_if.h"
-#include "rend/osd.h"
 
 void PipelineManager::CreateModVolPipeline(ModVolMode mode, int cullMode, bool naomi2)
 {
@@ -31,7 +30,7 @@ void PipelineManager::CreateModVolPipeline(ModVolMode mode, int cullMode, bool n
 
 	if (mode == ModVolMode::Final)
 	{
-		pipelineVertexInputStateCreateInfo = GetMainVertexInputStateCreateInfo(false);
+		pipelineVertexInputStateCreateInfo = GetMainVertexInputStateCreateInfo(false, naomi2);
 		pipelineInputAssemblyStateCreateInfo = vk::PipelineInputAssemblyStateCreateInfo(vk::PipelineInputAssemblyStateCreateFlags(),
 				vk::PrimitiveTopology::eTriangleStrip);
 	}
@@ -161,7 +160,7 @@ void PipelineManager::CreateModVolPipeline(ModVolMode mode, int cullMode, bool n
 void PipelineManager::CreateDepthPassPipeline(int cullMode, bool naomi2)
 {
 	// Vertex input state
-	vk::PipelineVertexInputStateCreateInfo pipelineVertexInputStateCreateInfo = GetMainVertexInputStateCreateInfo(false);
+	vk::PipelineVertexInputStateCreateInfo pipelineVertexInputStateCreateInfo = GetMainVertexInputStateCreateInfo(false, false);
 	// Input assembly state
 	vk::PipelineInputAssemblyStateCreateInfo pipelineInputAssemblyStateCreateInfo
 	(
@@ -189,6 +188,17 @@ void PipelineManager::CreateDepthPassPipeline(int cullMode, bool naomi2)
 	  0.0f,                                         // depthBiasSlopeFactor
 	  1.0f                                          // lineWidth
 	);
+
+	// Dreamcast uses the last vertex as the provoking vertex, but Vulkan uses the first.
+	// Utilize VK_EXT_provoking_vertex when available to set the provoking vertex to be the
+	// last vertex
+	vk::PipelineRasterizationProvokingVertexStateCreateInfoEXT provokingVertexInfo{};
+	if (GetContext()->hasProvokingVertex())
+	{
+		provokingVertexInfo.provokingVertexMode = vk::ProvokingVertexModeEXT::eLastVertex;
+		pipelineRasterizationStateCreateInfo.pNext = &provokingVertexInfo;
+	}
+
 	vk::PipelineMultisampleStateCreateInfo pipelineMultisampleStateCreateInfo;
 
 	// Depth and stencil
@@ -262,7 +272,7 @@ void PipelineManager::CreateDepthPassPipeline(int cullMode, bool naomi2)
 
 void PipelineManager::CreatePipeline(u32 listType, bool sortTriangles, const PolyParam& pp, int gpuPalette, bool dithering)
 {
-	vk::PipelineVertexInputStateCreateInfo pipelineVertexInputStateCreateInfo = GetMainVertexInputStateCreateInfo();
+	vk::PipelineVertexInputStateCreateInfo pipelineVertexInputStateCreateInfo = GetMainVertexInputStateCreateInfo(true, pp.isNaomi2());
 
 	// Input assembly state
 	vk::PipelineInputAssemblyStateCreateInfo pipelineInputAssemblyStateCreateInfo;
@@ -295,6 +305,17 @@ void PipelineManager::CreatePipeline(u32 listType, bool sortTriangles, const Pol
 	  0.0f,                                         // depthBiasSlopeFactor
 	  1.0f                                          // lineWidth
 	);
+
+	// Dreamcast uses the last vertex as the provoking vertex, but Vulkan uses the first.
+	// Utilize VK_EXT_provoking_vertex when available to set the provoking vertex to be the
+	// last vertex
+	vk::PipelineRasterizationProvokingVertexStateCreateInfoEXT provokingVertexInfo{};
+	if (GetContext()->hasProvokingVertex())
+	{
+		provokingVertexInfo.provokingVertexMode = vk::ProvokingVertexModeEXT::eLastVertex;
+		pipelineRasterizationStateCreateInfo.pNext = &provokingVertexInfo;
+	}
+
 	vk::PipelineMultisampleStateCreateInfo pipelineMultisampleStateCreateInfo;
 
 	// Depth and stencil
@@ -375,7 +396,7 @@ void PipelineManager::CreatePipeline(u32 listType, bool sortTriangles, const Pol
 	FragmentShaderParams params = {};
 	params.alphaTest = listType == ListType_Punch_Through;
 	params.bumpmap = pp.tcw.PixelFmt == PixelBumpMap;
-	params.clamping = pp.tsp.ColorClamp && (pvrrc.fog_clamp_min.full != 0 || pvrrc.fog_clamp_max.full != 0xffffffff);
+	params.clamping = pp.tsp.ColorClamp;
 	params.insideClipTest = (pp.tileclip >> 28) == 3;
 	params.fog = config::Fog ? pp.tsp.FogCtrl : 2;
 	params.gouraud = pp.pcw.Gouraud;
@@ -413,80 +434,4 @@ void PipelineManager::CreatePipeline(u32 listType, bool sortTriangles, const Pol
 
 	pipelines[hash(listType, sortTriangles, &pp, gpuPalette, dithering)] = GetContext()->GetDevice().createGraphicsPipelineUnique(GetContext()->GetPipelineCache(),
 			graphicsPipelineCreateInfo).value;
-}
-
-void OSDPipeline::CreatePipeline()
-{
-	// Vertex input state
-	static const vk::VertexInputBindingDescription vertexInputBindingDescription(0, sizeof(OSDVertex));
-	static const std::array<vk::VertexInputAttributeDescription, 3> vertexInputAttributeDescriptions = {
-			vk::VertexInputAttributeDescription(0, 0, vk::Format::eR32G32Sfloat, offsetof(OSDVertex, x)),	// pos
-			vk::VertexInputAttributeDescription(1, 0, vk::Format::eR8G8B8A8Uint, offsetof(OSDVertex, r)),	// color
-			vk::VertexInputAttributeDescription(2, 0, vk::Format::eR32G32Sfloat, offsetof(OSDVertex, u)),	// tex coord
-	};
-	vk::PipelineVertexInputStateCreateInfo vertexInputStateCreateInfo(
-				vk::PipelineVertexInputStateCreateFlags(),
-				vertexInputBindingDescription,
-				vertexInputAttributeDescriptions);
-
-	// Input assembly state
-	vk::PipelineInputAssemblyStateCreateInfo pipelineInputAssemblyStateCreateInfo(vk::PipelineInputAssemblyStateCreateFlags(), vk::PrimitiveTopology::eTriangleStrip);
-
-	// Viewport and scissor states
-	vk::PipelineViewportStateCreateInfo pipelineViewportStateCreateInfo(vk::PipelineViewportStateCreateFlags(), 1, nullptr, 1, nullptr);
-
-	// Rasterization and multisample states
-	vk::PipelineRasterizationStateCreateInfo pipelineRasterizationStateCreateInfo;
-	pipelineRasterizationStateCreateInfo.lineWidth = 1.0;
-	vk::PipelineMultisampleStateCreateInfo pipelineMultisampleStateCreateInfo;
-
-	// Depth and stencil
-	vk::PipelineDepthStencilStateCreateInfo pipelineDepthStencilStateCreateInfo;
-
-	// Color flags and blending
-	vk::PipelineColorBlendAttachmentState pipelineColorBlendAttachmentState(
-			true,								// blendEnable
-			vk::BlendFactor::eSrcAlpha,			// srcColorBlendFactor
-			vk::BlendFactor::eOneMinusSrcAlpha, // dstColorBlendFactor
-			vk::BlendOp::eAdd,					// colorBlendOp
-			vk::BlendFactor::eSrcAlpha,			// srcAlphaBlendFactor
-			vk::BlendFactor::eOneMinusSrcAlpha, // dstAlphaBlendFactor
-			vk::BlendOp::eAdd,					// alphaBlendOp
-			vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG
-						| vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA
-	);
-	vk::PipelineColorBlendStateCreateInfo pipelineColorBlendStateCreateInfo
-	(
-	  vk::PipelineColorBlendStateCreateFlags(),   // flags
-	  false,                                      // logicOpEnable
-	  vk::LogicOp::eNoOp,                         // logicOp
-	  pipelineColorBlendAttachmentState,         // attachments
-	  { { 1.0f, 1.0f, 1.0f, 1.0f } }              // blendConstants
-	);
-
-	std::array<vk::DynamicState, 2> dynamicStates = { vk::DynamicState::eViewport, vk::DynamicState::eScissor };
-	vk::PipelineDynamicStateCreateInfo pipelineDynamicStateCreateInfo(vk::PipelineDynamicStateCreateFlags(), dynamicStates);
-
-	std::array<vk::PipelineShaderStageCreateInfo, 2> stages = {
-			vk::PipelineShaderStageCreateInfo(vk::PipelineShaderStageCreateFlags(), vk::ShaderStageFlagBits::eVertex, shaderManager->GetOSDVertexShader(), "main"),
-			vk::PipelineShaderStageCreateInfo(vk::PipelineShaderStageCreateFlags(), vk::ShaderStageFlagBits::eFragment, shaderManager->GetOSDFragmentShader(), "main"),
-	};
-	vk::GraphicsPipelineCreateInfo graphicsPipelineCreateInfo
-	(
-	  vk::PipelineCreateFlags(),                  // flags
-	  stages,                                     // stages
-	  &vertexInputStateCreateInfo,			      // pVertexInputState
-	  &pipelineInputAssemblyStateCreateInfo,      // pInputAssemblyState
-	  nullptr,                                    // pTessellationState
-	  &pipelineViewportStateCreateInfo,           // pViewportState
-	  &pipelineRasterizationStateCreateInfo,      // pRasterizationState
-	  &pipelineMultisampleStateCreateInfo,        // pMultisampleState
-	  &pipelineDepthStencilStateCreateInfo,       // pDepthStencilState
-	  &pipelineColorBlendStateCreateInfo,         // pColorBlendState
-	  &pipelineDynamicStateCreateInfo,            // pDynamicState
-	  *pipelineLayout,                            // layout
-	  renderPass                                  // renderPass
-	);
-
-	pipeline = GetContext()->GetDevice().createGraphicsPipelineUnique(GetContext()->GetPipelineCache(), graphicsPipelineCreateInfo).value;
 }

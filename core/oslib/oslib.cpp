@@ -25,22 +25,69 @@
 #ifndef _WIN32
 #include <unistd.h>
 #endif
+#if defined(USE_SDL)
+#include "sdl/sdl.h"
+#else
+	#if defined(SUPPORT_X11)
+		#include "linux-dist/x11.h"
+	#endif
+	#if defined(USE_EVDEV)
+		#include "linux-dist/evdev.h"
+	#endif
+#endif
+#if defined(_WIN32) && !defined(TARGET_UWP)
+#include "windows/rawinput.h"
+#include <shlobj.h>
+#endif
+#include "profiler/fc_profiler.h"
+#include "input/gamepad_device.h"
 
 namespace hostfs
 {
 
-std::string getVmuPath(const std::string& port)
+std::string getVmuPath(const std::string& port, bool save)
 {
-	if (port == "A1" && config::PerGameVmu && !settings.content.path.empty())
-		return get_game_save_prefix() + "_vmu_save_A1.bin";
+	if (port == "A1" && config::PerGameVmu)
+	{
+		if (settings.platform.isConsole() && !settings.content.gameId.empty())
+		{
+			constexpr std::string_view INVALID_CHARS { " /\\:*?|<>" };
+			std::string vmuName = settings.content.gameId;
+			for (char &c: vmuName)
+				if (INVALID_CHARS.find(c) != INVALID_CHARS.npos)
+					c = '_';
+			vmuName += "_vmu_save_A1.bin";
+			std::string wpath = get_writable_data_path(vmuName);
+            if (save || file_exists(wpath))
+            	return wpath;
+            std::string rpath = get_readonly_data_path(vmuName);
+            if (hostfs::storage().exists(rpath))
+            	return rpath;
+            if (!settings.content.path.empty())
+            {
+            	// Legacy path using the rom file name
+            	rpath = get_game_save_prefix() + "_vmu_save_A1.bin";
+            	if (file_exists(rpath))
+            		return rpath;
+            }
+            return wpath;
+		}
+		if (!settings.content.path.empty())
+			return get_game_save_prefix() + "_vmu_save_A1.bin";
+	}
 
-	char tempy[512];
-	sprintf(tempy, "vmu_save_%s.bin", port.c_str());
+	std::string vmuName = "vmu_save_" + port + ".bin";
+	std::string wpath = get_writable_data_path(vmuName);
+	if (save || file_exists(wpath))
+		return wpath;
+	std::string rpath = get_readonly_data_path(vmuName);
+	if (hostfs::storage().exists(rpath))
+		return rpath;
 	// VMU saves used to be stored in .reicast, not in .reicast/data
-	std::string apath = get_writable_config_path(tempy);
-	if (!file_exists(apath))
-		apath = get_writable_data_path(tempy);
-	return apath;
+	rpath = get_readonly_config_path(vmuName);
+	if (file_exists(rpath))
+		return rpath;
+	return wpath;
 }
 
 std::string getArcadeFlashPath()
@@ -63,13 +110,16 @@ std::string findFlash(const std::string& prefix, const std::string& names)
 			name = name.replace(percent, 1, prefix);
 
 		std::string fullpath = get_readonly_data_path(name);
-		if (file_exists(fullpath))
+		if (hostfs::storage().exists(fullpath))
 			return fullpath;
 		for (const auto& path : config::ContentPath.get())
 		{
-			fullpath = path + "/" + name;
-			if (file_exists(fullpath))
-				return fullpath;
+			try {
+				fullpath = hostfs::storage().getSubPath(path, name);
+				if (hostfs::storage().exists(fullpath))
+					return fullpath;
+			} catch (const hostfs::StorageException& e) {
+			}
 		}
 
 		start = semicolon;
@@ -88,14 +138,14 @@ std::string getFlashSavePath(const std::string& prefix, const std::string& name)
 std::string findNaomiBios(const std::string& name)
 {
 	std::string fullpath = get_readonly_data_path(name);
-	if (file_exists(fullpath))
+	if (hostfs::storage().exists(fullpath))
 		return fullpath;
 	for (const auto& path : config::ContentPath.get())
 	{
 		try {
 			fullpath = hostfs::storage().getSubPath(path, name);
-			hostfs::storage().getFileInfo(fullpath);
-			return fullpath;
+			if (hostfs::storage().exists(fullpath))
+				return fullpath;
 		} catch (const hostfs::StorageException& e) {
 		}
 	}
@@ -113,10 +163,22 @@ std::string getSavestatePath(int index, bool writable)
 	state_file = state_file + index_str + ".state";
 	if (index == -1)
 		state_file += ".net";
-	if (writable)
+
+	static std::string lastFile;
+	static std::string lastPath;
+
+	if (writable) {
+		lastFile.clear();
 		return get_writable_data_path(state_file);
+	}
 	else
-		return get_readonly_data_path(state_file);
+	{
+		if (lastFile != state_file) {
+			lastFile = state_file;
+			lastPath = get_readonly_data_path(state_file);
+		}
+		return lastPath;
+	}
 }
 
 std::string getShaderCachePath(const std::string& filename)
@@ -137,11 +199,197 @@ std::string getTextureDumpPath()
 	return get_writable_data_path("texdump/");
 }
 
+#if defined(__unix__) && !defined(__ANDROID__)
+
+static std::string runCommand(const std::string& cmd)
+{
+	char buf[1024] {};
+	FILE *fp = popen(cmd.c_str(), "r");
+	if (fp == nullptr) {
+		INFO_LOG(COMMON, "popen failed: %d", errno);
+		return "";
+	}
+	std::string result;
+	while (fgets(buf, sizeof(buf), fp) != nullptr)
+		result += trim_trailing_ws(buf, "\n");
+
+	int rc;
+	if ((rc = pclose(fp)) != 0) {
+		INFO_LOG(COMMON, "Command error: %d", rc);
+		return "";
+	}
+
+	return result;
+}
+
+static std::string getScreenshotsPath()
+{
+	std::string picturesPath = runCommand("xdg-user-dir PICTURES");
+	if (!picturesPath.empty())
+		return picturesPath;
+	const char *home = nowide::getenv("HOME");
+	if (home != nullptr)
+		return home;
+	else
+		return ".";
+}
+
+#elif defined(TARGET_UWP)
+//TODO move to shell/uwp?
+using namespace Platform;
+using namespace Windows::Foundation;
+using namespace Windows::Storage;
+
+void saveScreenshot(const std::string& name, const std::vector<u8>& data)
+{
+	try {
+		StorageFolder^ folder = KnownFolders::PicturesLibrary;	// or SavedPictures?
+		if (folder == nullptr) {
+			INFO_LOG(COMMON, "KnownFolders::PicturesLibrary is null");
+			throw FlycastException("Can't find Pictures library");
+		}
+		nowide::wstackstring wstr;
+		wchar_t *wname = wstr.convert(name.c_str());
+		String^ msname = ref new String(wname);
+		ArrayReference<u8> arrayRef(const_cast<u8*>(&data[0]), data.size());
+
+		IAsyncOperation<StorageFile^>^ op = folder->CreateFileAsync(msname, CreationCollisionOption::FailIfExists);
+		cResetEvent asyncEvent;
+		op->Completed = ref new AsyncOperationCompletedHandler<StorageFile^>(
+			[&asyncEvent, &arrayRef](IAsyncOperation<StorageFile^>^ op, AsyncStatus) {
+				IAsyncAction^ action = FileIO::WriteBytesAsync(op->GetResults(), arrayRef);
+				action->Completed = ref new AsyncActionCompletedHandler(
+					[&asyncEvent](IAsyncAction^, AsyncStatus){
+						asyncEvent.Set();
+					});
+			});
+		asyncEvent.Wait();
+	}
+	catch (COMException^ e) {
+		WARN_LOG(COMMON, "Save screenshot failed: %S", e->Message->Data());
+		throw FlycastException("");
+	}
+}
+
+#elif defined(_WIN32) && !defined(TARGET_UWP)
+
+static std::string getScreenshotsPath()
+{
+	wchar_t *screenshotPath;
+	if (FAILED(SHGetKnownFolderPath(FOLDERID_Screenshots, KF_FLAG_CREATE, NULL, &screenshotPath))
+			&& FAILED(SHGetKnownFolderPath(FOLDERID_Pictures, KF_FLAG_CREATE, NULL, &screenshotPath)))
+		return get_writable_config_path("");
+	nowide::stackstring path;
+	std::string ret;
+	if (path.convert(screenshotPath) == nullptr)
+		ret = get_writable_config_path("");
+	else
+		ret = path.get();
+	CoTaskMemFree(screenshotPath);
+
+	return ret;
+}
+
+#else
+
+std::string getScreenshotsPath();
+
+#endif
+
+#if !defined(__ANDROID__) && !defined(TARGET_UWP) && !defined(TARGET_IPHONE) && !defined(__SWITCH__)
+
+void saveScreenshot(const std::string& name, const std::vector<u8>& data)
+{
+	std::string path = getScreenshotsPath();
+	path += "/" + name;
+	FILE *f = nowide::fopen(path.c_str(), "wb");
+	if (f == nullptr)
+		throw FlycastException(path);
+	if (std::fwrite(&data[0], data.size(), 1, f) != 1) {
+		std::fclose(f);
+		unlink(path.c_str());
+		throw FlycastException(path);
+	}
+	std::fclose(f);
+}
+
+#endif
+
+#ifndef USE_LIBCDIO
+const std::vector<std::string>& getCdromDrives() {
+	static std::vector<std::string> empty;
+	return empty;
+}
+#endif
+
+} // namespace hostfs
+
+void os_CreateWindow()
+{
+#if defined(USE_SDL)
+	sdl_window_create();
+#elif defined(SUPPORT_X11)
+	x11_window_create();
+#endif
+}
+
+void os_DestroyWindow()
+{
+#if defined(USE_SDL)
+	sdl_window_destroy();
+#elif defined(SUPPORT_X11)
+	x11_window_destroy();
+#endif
+}
+
+void os_SetupInput()
+{
+#if defined(USE_SDL)
+	input_sdl_init();
+#else
+	#if defined(SUPPORT_X11)
+		input_x11_init();
+	#endif
+	#if defined(USE_EVDEV)
+		input_evdev_init();
+	#endif
+#endif
+#if defined(_WIN32) && !defined(TARGET_UWP)
+	if (config::UseRawInput)
+		rawinput::init();
+#endif
+}
+
+void os_TermInput()
+{
+#if defined(USE_SDL)
+	input_sdl_quit();
+#else
+	#if defined(USE_EVDEV)
+		input_evdev_close();
+	#endif
+#endif
+#if defined(_WIN32) && !defined(TARGET_UWP)
+	if (config::UseRawInput)
+		rawinput::term();
+#endif
+}
+
+void os_UpdateInputState()
+{
+	FC_PROFILE_SCOPE;
+
+	GamepadDevice::RampAnalog();
+#if defined(USE_SDL)
+	input_sdl_handle();
+#elif defined(USE_EVDEV)
+	input_evdev_handle();
+#endif
 }
 
 #ifdef USE_BREAKPAD
 
-#include "rend/boxart/http_client.h"
+#include "http_client.h"
 #include "version.h"
 #include "log/InMemoryListener.h"
 #include "wsi/context.h"

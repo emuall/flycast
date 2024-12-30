@@ -47,34 +47,29 @@ void maple_vblank()
 {
 	if (SB_MDEN & 1)
 	{
-		if (SDCKBOccupied)
+		if (SB_MDTSEL == 1)
 		{
-			maple_schd(0, 0, 0, nullptr);
-			SDCKBOccupied = false;
-		}
-		else
-		{
-			if (SB_MDTSEL == 1)
-			{
-				if (maple_ddt_pending_reset)
-				{
-					DEBUG_LOG(MAPLE, "DDT vblank ; reset pending");
-				}
-				else
-				{
-					DEBUG_LOG(MAPLE, "DDT vblank");
-					SB_MDST = 1;
-					maple_DoDma();
-					// if trigger reset is manual, mark it as pending
-					if ((SB_MSYS >> 12) & 1)
-						maple_ddt_pending_reset = true;
-				}
+			// Hardware trigger on vblank
+			if (maple_ddt_pending_reset) {
+				DEBUG_LOG(MAPLE, "DDT vblank ; reset pending");
 			}
 			else
 			{
-				maple_ddt_pending_reset = false;
+				DEBUG_LOG(MAPLE, "DDT vblank");
+				SB_MDST = 1;
+				maple_DoDma();
+				// if trigger reset is manual, mark it as pending
+				if ((SB_MSYS >> 12) & 1)
+					maple_ddt_pending_reset = true;
 			}
 		}
+		else
+		{
+			maple_ddt_pending_reset = false;
+			if (SDCKBOccupied)
+				maple_schd(0, 0, 0, nullptr);
+		}
+		SDCKBOccupied = false;
 	}
 	if (settings.platform.isConsole())
 		maple_handle_reconnect();
@@ -128,6 +123,14 @@ static void maple_SB_MDSTAR_Write(u32 addr, u32 data)
 		asic_RaiseInterrupt(holly_MAPLE_ILLADDR);
 }
 #endif
+
+static u32 getPort(u32 addr)
+{
+	for (int i = 0; i < 6; i++)
+		if ((1 << i) & addr)
+			return i;
+	return 5;
+}
 
 static void maple_DoDma()
 {
@@ -207,8 +210,8 @@ static void maple_DoDma()
 			//Number of additional words in frame 
 			u32 inlen = (frame_header >> 24) & 0xFF;
 
-			u32 port = maple_GetPort(reci);
-			u32 bus = maple_GetBusId(reci);
+			u32 port = getPort(reci);
+			u32 bus = reci >> 6;
 
 			if (MapleDevices[bus][5] && MapleDevices[bus][port])
 			{

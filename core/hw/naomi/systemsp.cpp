@@ -988,8 +988,37 @@ protected:
 		u64 startTime = 0;
 	};
 
-	void getInputState() {
+	void getInputState()
+	{
 		ggpo::getInput(mapleInputState);
+		if (NaomiGameInputs != nullptr)
+		{
+			for (const ButtonDescriptor& bd : NaomiGameInputs->buttons)
+			{
+				if (bd.name == nullptr)
+					break;
+				if (bd.target != 0)
+				{
+					// remap P1 -> P1 and P2 -> P2
+					if ((mapleInputState[0].kcode & bd.source) == 0)
+						mapleInputState[0].kcode &= ~bd.target;
+					if ((mapleInputState[1].kcode & bd.source) == 0)
+						mapleInputState[1].kcode &= ~bd.target;
+				}
+				else if (bd.p2_target != 0)
+				{
+					// remap P1 -> P2
+					if ((mapleInputState[0].kcode & bd.source) == 0)
+						mapleInputState[1].kcode &= ~bd.p2_target;
+				}
+				else if (bd.p1_target != 0)
+				{
+					// remap P2 -> P1
+					if ((mapleInputState[1].kcode & bd.source) == 0)
+						mapleInputState[0].kcode &= ~bd.p1_target;
+				}
+			}
+		}
 	}
 
 	MapleInputState mapleInputState[4];
@@ -1300,7 +1329,7 @@ class MedalIOManager : public DefaultIOManager
 	}
 
 	// OUT-1 (CN10 17-24)
-	void setCN10_17_24(u8 v)
+	void setCN10_17_24(u8 v) override
 	{
 		// 0: sw.lamp c
 		// 1: jp solenoid
@@ -2088,12 +2117,18 @@ void SystemSpCart::Init(LoadProgress *progress, std::vector<u8> *digest)
 	{
 		std::string parent = hostfs::storage().getParentPath(settings.content.path);
 		std::string gdrom_path = get_file_basename(settings.content.fileName) + "/" + std::string(mediaName) + ".chd";
-		gdrom_path = hostfs::storage().getSubPath(parent, gdrom_path);
-		chd = openChd(gdrom_path);
+		try {
+			gdrom_path = hostfs::storage().getSubPath(parent, gdrom_path);
+			chd = openChd(gdrom_path);
+		} catch (const FlycastException& e) {
+		}
 		if (parentName != nullptr && chd == nullptr)
 		{
-			std::string gdrom_parent_path = hostfs::storage().getSubPath(parent, std::string(parentName) + "/" + std::string(mediaName) + ".chd");
-			chd = openChd(gdrom_parent_path);
+			try {
+				std::string gdrom_parent_path = hostfs::storage().getSubPath(parent, std::string(parentName) + "/" + std::string(mediaName) + ".chd");
+				chd = openChd(gdrom_parent_path);
+			} catch (const FlycastException& e) {
+			}
 		}
 		if (chd == nullptr)
 			throw NaomiCartException("SystemSP: Cannot open CompactFlash file " + gdrom_path);

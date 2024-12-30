@@ -18,7 +18,7 @@ if(APPLE)
 		set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum tvOS deployment version")
 		set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "")
 	else()
-		set(CMAKE_OSX_DEPLOYMENT_TARGET "10.11" CACHE STRING "Minimum macOS deployment version")
+		set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum macOS deployment version")
 		set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "")
 	endif()
 endif()
@@ -58,6 +58,7 @@ option(USE_GLES2 "Use GLES2 API" OFF)
 option(USE_HOST_GLSLANG "Use host glslang" OFF)
 option(USE_HOST_LIBZIP "Use host libzip" ON)
 option(USE_HOST_SDL "Use host SDL library" ${USE_HOST_SDL_DEFAULT})
+option(USE_HOST_LIBCHDR "Use host libchdr" OFF)
 option(USE_OPENMP "Use OpenMP if available" ON)
 option(USE_VULKAN "Build with Vulkan support" ON)
 option(USE_DX9 "Build with Direct3D 9 support" ON)
@@ -65,10 +66,17 @@ option(USE_DX11 "Build with Direct3D 11 support" ON)
 option(LIBRETRO "Build libretro core" OFF)
 option(USE_OPENGL "Use OpenGL API" ON)
 option(USE_VIDEOCORE "RPI: use the legacy Broadcom GLES libraries" OFF)
-option(APPLE_BREAKPAD "macOS: Build breakpad client and dump symbols" OFF)
+option(USE_ALSA "Build with ALSA support" ON)
+option(USE_LIBAO "Build with AO support" ON)
+option(USE_OSS "Build with OSS support" OFF)
+option(USE_PULSEAUDIO "Build with PulseAudio support" ON)
+option(USE_BREAKPAD "Build and link with breakpad library" ON)
+option(USE_LUA "Build with Lua support" ON)
 option(ENABLE_GDB_SERVER "Build with GDB debugging support" OFF)
 option(ENABLE_DC_PROFILER "Build with support for target machine (SH4) profiler" OFF)
 option(ENABLE_FC_PROFILER "Build with support for host app (Flycast) profiler" OFF)
+option(USE_DISCORD "Use Discord Presence API" OFF)
+option(USE_LIBCDIO "Use libcdio for CDROM access" OFF)
 
 if(IOS AND NOT LIBRETRO)
 	set(USE_VULKAN OFF CACHE BOOL "Force vulkan off" FORCE)
@@ -100,16 +108,21 @@ if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
 		OUTPUT_VARIABLE GIT_HASH
 		OUTPUT_STRIP_TRAILING_WHITESPACE
 	)
-	if(WINDOWS_STORE)
-		string(REGEX REPLACE "[Vv]" "" MS_VERSION ${GIT_VERSION})
-		string(REPLACE "-" "." MS_VERSION ${MS_VERSION})
-		string(REGEX REPLACE "\.g[0-9a-f]+" "" MS_VERSION ${MS_VERSION})
-		string(REGEX MATCH "[0-9]+\.[0-9]+\.[0-9]+" VERSION_3PARTS ${MS_VERSION})
-		if(VERSION_3PARTS STREQUAL "")
-			string(APPEND MS_VERSION ".0.0")
-		else()
-			string(APPEND MS_VERSION ".0")
-		endif()
+else()
+	set(GIT_VERSION "v0.0.0-0-g000000000")
+	set(GIT_HASH "000000000")
+endif()
+
+if(WINDOWS_STORE)
+	string(REGEX REPLACE "[Vv]" "" MS_VERSION ${GIT_VERSION})
+	string(REPLACE "-" "." MS_VERSION ${MS_VERSION})
+	string(REGEX REPLACE "\.g[0-9a-f]+" "" MS_VERSION ${MS_VERSION})
+	string(REGEX MATCHALL "[0-9]+" VERSION_PARTS ${MS_VERSION})
+	list(LENGTH VERSION_PARTS VERSION_PARTS_LENGTH)
+	if(VERSION_PARTS_LENGTH EQUAL 2)
+		string(APPEND MS_VERSION ".0.0")
+	elseif(VERSION_PARTS_LENGTH EQUAL 3)
+		string(APPEND MS_VERSION ".0")
 	endif()
 endif()
 
@@ -186,7 +199,11 @@ elseif(ANDROID)
 	target_compile_options(${PROJECT_NAME} PRIVATE -fno-stack-protector)
 	set(CMAKE_ANDROID_STL_TYPE "c++_static")
 elseif(WIN32)
-	add_executable(${PROJECT_NAME} WIN32 core/emulator.cpp)
+	if(BUILD_TESTING)
+		add_executable(${PROJECT_NAME} core/emulator.cpp)
+	else()
+		add_executable(${PROJECT_NAME} WIN32 core/emulator.cpp)
+	endif()
 	if(CMAKE_GENERATOR MATCHES "Visual Studio")
 		if(NOT CMAKE_VS_GLOBALS MATCHES "(^|;)UseMultiToolTask=")
 			list(APPEND CMAKE_VS_GLOBALS UseMultiToolTask=true)
@@ -248,7 +265,7 @@ if(NOT "${SENTRY_UPLOAD_URL}" STREQUAL "")
 	target_compile_definitions(${PROJECT_NAME} PRIVATE SENTRY_UPLOAD="${SENTRY_UPLOAD_URL}")
 endif()
 
-target_include_directories(${PROJECT_NAME} PRIVATE core core/deps core/deps/stb core/deps/json)
+target_include_directories(${PROJECT_NAME} PRIVATE core core/deps core/deps/stb core/deps/json core/deps/asio/asio/include)
 if(LIBRETRO)
 	target_include_directories(${PROJECT_NAME} PRIVATE shell/libretro)
 endif()
@@ -256,7 +273,7 @@ if(NINTENDO_SWITCH)
 	target_include_directories(${PROJECT_NAME} PRIVATE shell/switch)
 endif()
 
-if(NOT LIBRETRO)
+if(USE_BREAKPAD AND NOT LIBRETRO)
 	find_program(SH_EXECUTABLE sh)
 	if((ANDROID AND NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows") OR (MINGW AND SH_EXECUTABLE) OR (CMAKE_SYSTEM_NAME STREQUAL "Linux"))
 		add_subdirectory(core/deps/breakpad)
@@ -265,7 +282,7 @@ if(NOT LIBRETRO)
 		endif()
 		target_link_libraries(${PROJECT_NAME} PUBLIC breakpad_client)
 		target_compile_definitions(${PROJECT_NAME} PRIVATE USE_BREAKPAD)
-	elseif(APPLE AND NOT IOS AND APPLE_BREAKPAD)
+	elseif(APPLE AND NOT IOS)
 		target_sources(${PROJECT_NAME} PRIVATE
 			core/deps/breakpad/src/client/minidump_file_writer-inl.h
 			core/deps/breakpad/src/client/minidump_file_writer.cc
@@ -317,26 +334,26 @@ if(NOT LIBRETRO)
 				COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/build/breakpad/dump_syms
 					-a x86_64
 					-g ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/Flycast.app.dSYM
-					${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/Flycast.app/Contents/MacOS/Flycast > ../symbols/Flycast-x64.sym
+					$<TARGET_FILE:flycast> > ../symbols/Flycast-x64.sym
 				COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/build/breakpad/dump_syms
 					-a arm64
 					-g ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/Flycast.app.dSYM
-					${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/Flycast.app/Contents/MacOS/Flycast > ../symbols/Flycast-arm64.sym
+					$<TARGET_FILE:flycast> > ../symbols/Flycast-arm64.sym
 			)
 		else()
 			add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 				COMMAND sleep 20
 				COMMAND mkdir -p ../symbols
-				COMMAND dsymutil ${CMAKE_CURRENT_BINARY_DIR}/Flycast.app/Contents/MacOS/Flycast
+				COMMAND dsymutil $<TARGET_FILE:flycast>
 					-o ${CMAKE_CURRENT_BINARY_DIR}/Flycast.app.dSYM
 				COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/build/breakpad/dump_syms
 					-a x86_64
 					-g ${CMAKE_CURRENT_BINARY_DIR}/Flycast.app.dSYM
-					${CMAKE_CURRENT_BINARY_DIR}/Flycast.app/Contents/MacOS/Flycast > ../symbols/Flycast-x64.sym
+					$<TARGET_FILE:flycast> > ../symbols/Flycast-x64.sym
 				COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/build/breakpad/dump_syms
 					-a arm64
 					-g ${CMAKE_CURRENT_BINARY_DIR}/Flycast.app.dSYM
-					${CMAKE_CURRENT_BINARY_DIR}/Flycast.app/Contents/MacOS/Flycast > ../symbols/Flycast-arm64.sym
+					$<TARGET_FILE:flycast> > ../symbols/Flycast-arm64.sym
 			)
 		endif()
 	endif()
@@ -366,7 +383,7 @@ if(USE_OPENMP)
 				message("-- Found OpenMP.xcframework: ${OPENMP_FRAMEWORK} (Linking static library before CMake support linking xcframework)")
 				target_link_libraries(${PROJECT_NAME} PRIVATE ${OPENMP_FRAMEWORK})
 				target_include_directories(${PROJECT_NAME} PRIVATE ${OPENMP_XCFRAMEWORK}/ios-arm64_arm64e/OpenMP.framework/Versions/A/Headers)
-				set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Xclang -fopenmp")
+				target_compile_options(${PROJECT_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Xclang -fopenmp>)
 			endif()
 		else()
 			message("-- Could NOT find OpenMP.xcframework, compile it using shell/apple/emulator-ios/OpenMP/build_ios_openmp.sh")
@@ -401,11 +418,17 @@ if(USE_VULKAN)
 endif()
 
 if(NOT LIBRETRO)
-	find_package(ALSA)
-	if(ALSA_FOUND AND NOT ANDROID)
-		target_compile_definitions(${PROJECT_NAME} PRIVATE USE_ALSA)
-		target_include_directories(${PROJECT_NAME} PRIVATE ${ALSA_INCLUDE_DIRS})
-		target_link_libraries(${PROJECT_NAME} PRIVATE ${ALSA_LIBRARIES})
+	if(USE_OSS)
+		target_compile_definitions(${PROJECT_NAME} PRIVATE USE_OSS)
+	endif()
+
+	if(USE_ALSA)
+		find_package(ALSA)
+		if(ALSA_FOUND AND NOT ANDROID)
+			target_compile_definitions(${PROJECT_NAME} PRIVATE USE_ALSA)
+			target_include_directories(${PROJECT_NAME} PRIVATE ${ALSA_INCLUDE_DIRS})
+			target_link_libraries(${PROJECT_NAME} PRIVATE ${ALSA_LIBRARIES})
+		endif()
 	endif()
 
 	if(MINGW)
@@ -423,7 +446,7 @@ if(NOT LIBRETRO)
 		endif()
 
 		# SDL2::SDL2main may or may not be available. It is e.g. required by Windows GUI applications
-		if(TARGET SDL2::SDL2main)
+		if(TARGET SDL2::SDL2main AND NOT BUILD_TESTING)
 			# It has an implicit dependency on SDL2 functions, so it MUST be added before SDL2::SDL2 (or SDL2::SDL2-static)
 			target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2main)
 		endif()
@@ -438,7 +461,14 @@ if(NOT LIBRETRO)
 		endif()
 
 		target_compile_definitions(${PROJECT_NAME} PRIVATE USE_SDL USE_SDL_AUDIO)
-		target_sources(${PROJECT_NAME} PRIVATE core/sdl/sdl.cpp core/sdl/sdl.h core/sdl/sdl_gamepad.h core/sdl/sdl_keyboard.h)
+		target_sources(${PROJECT_NAME} PRIVATE
+			core/sdl/sdl.cpp
+			core/sdl/sdl.h
+			core/sdl/sdl_gamepad.h
+			core/sdl/sdl_keyboard.h
+			core/sdl/sdl_keyboard_mac.h
+			core/sdl/dreamconn.cpp
+			core/sdl/dreamconn.h)
 
 		if((UNIX AND NOT APPLE) OR NINTENDO_SWITCH)
 			find_package(CURL REQUIRED)
@@ -452,18 +482,26 @@ if(NOT LIBRETRO)
 		target_link_libraries(${PROJECT_NAME} PRIVATE ZLIB::ZLIB)
 	endif()
 
-	find_package(Lua 5.2)
-	if(NOT APPLE AND LUA_FOUND)
-		target_compile_definitions(${PROJECT_NAME} PRIVATE USE_LUA)
-		target_include_directories(${PROJECT_NAME} PRIVATE ${LUA_INCLUDE_DIR} core/deps/luabridge/Source)
-		list(TRANSFORM LUA_LIBRARIES REPLACE "\.dll" "")
-		target_link_libraries(${PROJECT_NAME} PRIVATE ${LUA_LIBRARIES})
+	if(USE_LUA)
+		find_package(Lua 5.2)
+		if(NOT APPLE AND LUA_FOUND)
+			target_compile_definitions(${PROJECT_NAME} PRIVATE USE_LUA)
+			target_include_directories(${PROJECT_NAME} PRIVATE ${LUA_INCLUDE_DIR} core/deps/luabridge/Source)
+			list(TRANSFORM LUA_LIBRARIES REPLACE "\.dll" "")
+			target_link_libraries(${PROJECT_NAME} PRIVATE ${LUA_LIBRARIES})
+		endif()
 	endif()
 endif()
 
-add_subdirectory(core/deps/libchdr EXCLUDE_FROM_ALL)
-target_link_libraries(${PROJECT_NAME} PRIVATE chdr-static)
-target_include_directories(${PROJECT_NAME} PRIVATE core/deps/libchdr/include)
+find_package(PkgConfig)
+if(PKG_CONFIG_FOUND AND USE_HOST_LIBCHDR)
+	pkg_check_modules(LIBCHDR IMPORTED_TARGET libchdr)
+	target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::LIBCHDR)
+else()
+	add_subdirectory(core/deps/libchdr EXCLUDE_FROM_ALL)
+	target_link_libraries(${PROJECT_NAME} PRIVATE chdr-static)
+	target_include_directories(${PROJECT_NAME} PRIVATE core/deps/libchdr/include)
+endif()
 
 if(NOT WITH_SYSTEM_ZLIB)
 	set(ZLIB_RELATIVE_PATH "core/deps/libchdr/deps/zlib-1.3.1")
@@ -477,12 +515,13 @@ if(NOT WITH_SYSTEM_ZLIB)
 	get_target_property(ZLIB_LIBRARY_DEBUG zlibstatic LOCATION_Debug)
 endif()
 
-find_package(PkgConfig)
 if(PKG_CONFIG_FOUND AND NOT ANDROID AND NOT APPLE AND NOT LIBRETRO)
-	pkg_check_modules(AO IMPORTED_TARGET ao)
-	if(AO_FOUND)
-		target_compile_definitions(${PROJECT_NAME} PRIVATE USE_LIBAO)
-		target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::AO)
+	if(USE_LIBAO)
+		pkg_check_modules(AO IMPORTED_TARGET ao)
+		if(AO_FOUND)
+			target_compile_definitions(${PROJECT_NAME} PRIVATE USE_LIBAO)
+			target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::AO)
+		endif()
 	endif()
 
 	if(NOT SDL2_FOUND)
@@ -499,10 +538,12 @@ if(PKG_CONFIG_FOUND AND NOT ANDROID AND NOT APPLE AND NOT LIBRETRO)
 		endif()
 	endif()
 
-	pkg_check_modules(LIBPULSE IMPORTED_TARGET libpulse)
-	if(LIBPULSE_FOUND)
-		target_compile_definitions(${PROJECT_NAME} PRIVATE USE_PULSEAUDIO)
-		target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::LIBPULSE)
+	if(USE_PULSEAUDIO)
+		pkg_check_modules(LIBPULSE IMPORTED_TARGET libpulse)
+		if(LIBPULSE_FOUND)
+			target_compile_definitions(${PROJECT_NAME} PRIVATE USE_PULSEAUDIO)
+			target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::LIBPULSE)
+		endif()
 	endif()
 
 	if(USE_HOST_LIBZIP)
@@ -533,6 +574,7 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
 	if(USE_GLES2)
 		target_compile_definitions(${PROJECT_NAME} PRIVATE GLES GLES2)
 		if(USE_VIDEOCORE)
+			target_compile_definitions(${PROJECT_NAME} PRIVATE TARGET_VIDEOCORE USE_OMX)
 			target_link_libraries(${PROJECT_NAME} PRIVATE "-lbrcmGLESv2")
 			target_link_directories(${PROJECT_NAME} PRIVATE "/opt/vc/lib")
 		endif()
@@ -616,6 +658,10 @@ if(NOT MINIUPNP_FOUND)
 endif()
 
 if(NOT LIBZIP_FOUND OR NINTENDO_SWITCH)
+	cmake_policy(SET CMP0026 OLD)
+	set(zstd_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/core/deps/libchdr/deps/zstd-1.5.6/lib")
+	get_target_property(zstd_STATIC_LIBRARY libzstd_static LOCATION)
+
 	option(ENABLE_COMMONCRYPTO "Enable use of CommonCrypto" OFF)
 	option(ENABLE_GNUTLS "Enable use of GnuTLS" OFF)
 	option(ENABLE_MBEDTLS "Enable use of mbed TLS" OFF)
@@ -623,15 +669,37 @@ if(NOT LIBZIP_FOUND OR NINTENDO_SWITCH)
 	option(ENABLE_WINDOWS_CRYPTO "Enable use of Windows cryptography libraries" OFF)
 	option(ENABLE_BZIP2 "Enable use of BZip2" OFF)
 	option(ENABLE_LZMA "Enable use of LZMA" OFF)
-	option(ENABLE_ZSTD "Enable use of Zstandard" OFF)
+	option(ENABLE_ZSTD "Enable use of Zstandard" ON)
 	option(BUILD_TOOLS "Build tools in the src directory (zipcmp, zipmerge, ziptool)" OFF)
 	option(BUILD_REGRESS "Build regression tests" OFF)
 	option(BUILD_EXAMPLES "Build examples" OFF)
 	option(BUILD_DOC "Build documentation" OFF)
 	option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 	option(LIBZIP_DO_INSTALL "Install libzip and the related files" OFF)
-	add_subdirectory(core/deps/libzip)
+	add_subdirectory(core/deps/libzip EXCLUDE_FROM_ALL)
 	target_link_libraries(${PROJECT_NAME} PRIVATE libzip::zip)
+endif()
+
+if(USE_LIBCDIO)
+	if(PKG_CONFIG_FOUND)
+		pkg_check_modules(CDIO IMPORTED_TARGET libcdio)
+		if(CDIO_FOUND)
+			target_compile_definitions(${PROJECT_NAME} PRIVATE USE_LIBCDIO)
+			if(MINGW)
+				# Force static link
+				target_link_libraries(${PROJECT_NAME} PRIVATE "-l:libcdio.a -l:libiconv.a -lwinmm")
+			else()
+				target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::CDIO)
+			endif()
+		endif()
+	endif()
+	if(NOT CDIO_FOUND)
+		find_package(libcdio)
+		if(TARGET libcdio::libcdio)
+			target_compile_definitions(${PROJECT_NAME} PRIVATE USE_LIBCDIO)
+			target_link_libraries(${PROJECT_NAME} PRIVATE libcdio::libcdio)
+		endif()
+	endif()
 endif()
 
 if(WIN32)
@@ -703,12 +771,13 @@ target_sources(${PROJECT_NAME} PRIVATE core/deps/lzma/7zArcIn.c core/deps/lzma/7
 add_subdirectory(core/deps/libelf)
 target_link_libraries(${PROJECT_NAME} PRIVATE elf)
 if(NOT LIBRETRO)
-	target_compile_definitions(${PROJECT_NAME} PRIVATE IMGUI_DISABLE_DEMO_WINDOWS)
+	target_compile_definitions(${PROJECT_NAME} PRIVATE IMGUI_DISABLE_DEMO_WINDOWS IMGUI_DEFINE_MATH_OPERATORS)
 	target_include_directories(${PROJECT_NAME} PRIVATE core/deps/imgui core/deps/imgui/backends)
 	target_sources(${PROJECT_NAME} PRIVATE
 		core/deps/imgui/imgui.cpp
 		core/deps/imgui/imgui_demo.cpp
 		core/deps/imgui/imgui_draw.cpp
+		core/deps/imgui/imgui_stdlib.cpp
 		core/deps/imgui/imgui_tables.cpp
 		core/deps/imgui/imgui_widgets.cpp)
 
@@ -723,6 +792,15 @@ if(NOT LIBRETRO)
 endif()
 target_sources(${PROJECT_NAME} PRIVATE core/deps/xbrz/xbrz.cpp)
 target_sources(${PROJECT_NAME} PRIVATE core/deps/md5/md5.cpp)
+
+if(USE_DISCORD AND NOT LIBRETRO)
+	option(BUILD_EXAMPLES "Build example apps" OFF)
+	add_subdirectory(core/deps/discord-rpc EXCLUDE_FROM_ALL)
+	target_include_directories(${PROJECT_NAME} PRIVATE core/deps/discord-rpc/include)
+	target_link_libraries(${PROJECT_NAME} PRIVATE discord-rpc)
+	target_compile_definitions(${PROJECT_NAME} PRIVATE USE_DISCORD)
+	target_sources(${PROJECT_NAME} PRIVATE core/ui/discord.cpp)
+endif()
 
 cmrc_add_resource_library(flycast-resources ALIAS flycast::res NAMESPACE flycast)
 target_link_libraries(${PROJECT_NAME} PRIVATE flycast::res)
@@ -1000,23 +1078,27 @@ cmrc_add_resources(flycast-resources
 		fonts/printer_kanji24x24.bin.zip)
 
 if(NOT LIBRETRO)
-	cmrc_add_resources(flycast-resources fonts/Roboto-Medium.ttf.zip)
-	if(ANDROID)
+	cmrc_add_resources(flycast-resources
+		fonts/Roboto-Medium.ttf.zip
+		fonts/Roboto-Regular.ttf.zip
+		fonts/fa-solid-900.ttf.zip)
+	if(ANDROID OR IOS)
 		cmrc_add_resources(flycast-resources
 			WHENCE resources
-			resources/picture/buttons.png)
+			resources/picture/buttons.png
+			resources/picture/buttons-arcade.png)
 	endif()
 endif()
 
 target_sources(${PROJECT_NAME} PRIVATE
 		core/imgread/cdi.cpp
+		core/imgread/cdio.cpp
 		core/imgread/chd.cpp
 		core/imgread/common.cpp
 		core/imgread/common.h
 		core/imgread/cue.cpp
 		core/imgread/gdi.cpp
 		core/imgread/ImgReader.cpp
-		core/imgread/ioctl.cpp
 		core/imgread/iso9660.h
 		core/imgread/isofs.cpp
 		core/imgread/isofs.h)
@@ -1047,19 +1129,18 @@ else()
 			core/linux/unwind_info.cpp)
 	if(NINTENDO_SWITCH)
 		target_sources(${PROJECT_NAME} PRIVATE
-				core/linux/libnx_vmem.cpp
+				shell/switch/libnx_vmem.cpp
 				shell/switch/stubs.c
 				shell/switch/context_switch.S
 				shell/switch/nswitch.h
 				shell/switch/switch_gamepad.h
+				shell/switch/switch_main.cpp
 				shell/switch/ucontext.h)
 	endif()
 endif()
 
 if(NOT LIBRETRO)
 	target_sources(${PROJECT_NAME} PRIVATE
-			core/linux-dist/dispmanx.cpp
-			core/linux-dist/dispmanx.h
 			core/linux-dist/evdev.cpp
 			core/linux-dist/evdev.h
 			core/linux-dist/icon.h
@@ -1118,6 +1199,8 @@ if(NOT LIBRETRO)
 			core/audio/audiobackend_pulseaudio.cpp
 			core/audio/audiobackend_sdl2.cpp
 			core/audio/audiostream.cpp
+			core/oslib/http_client.cpp
+			core/oslib/http_client.h
 			core/oslib/oslib.cpp)
 endif()
 
@@ -1161,6 +1244,44 @@ target_sources(${PROJECT_NAME} PRIVATE
 		core/reios/reios_elf.cpp
 		core/reios/reios_elf.h)
 cmrc_add_resources(flycast-resources fonts/biosfont.bin.zip)
+
+target_sources(${PROJECT_NAME} PRIVATE
+			core/achievements/achievements.cpp
+			core/achievements/achievements.h)
+if(NOT LIBRETRO)
+	target_sources(${PROJECT_NAME} PRIVATE
+			core/deps/rcheevos/src/rc_client_raintegration.c
+			core/deps/rcheevos/src/rc_client.c
+			core/deps/rcheevos/src/rc_compat.c
+			core/deps/rcheevos/src/rc_util.c
+			core/deps/rcheevos/src/rc_version.c
+			core/deps/rcheevos/src/rapi/rc_api_common.c
+			core/deps/rcheevos/src/rapi/rc_api_editor.c
+			core/deps/rcheevos/src/rapi/rc_api_info.c
+			core/deps/rcheevos/src/rapi/rc_api_runtime.c
+			core/deps/rcheevos/src/rapi/rc_api_user.c
+			core/deps/rcheevos/src/rcheevos/alloc.c
+			core/deps/rcheevos/src/rcheevos/condition.c
+			core/deps/rcheevos/src/rcheevos/condset.c
+			core/deps/rcheevos/src/rcheevos/consoleinfo.c
+			core/deps/rcheevos/src/rcheevos/format.c
+			core/deps/rcheevos/src/rcheevos/lboard.c
+			core/deps/rcheevos/src/rcheevos/memref.c
+			core/deps/rcheevos/src/rcheevos/operand.c
+			core/deps/rcheevos/src/rcheevos/rc_validate.c
+			core/deps/rcheevos/src/rcheevos/richpresence.c
+			core/deps/rcheevos/src/rcheevos/runtime_progress.c
+			core/deps/rcheevos/src/rcheevos/runtime.c
+			core/deps/rcheevos/src/rcheevos/trigger.c
+			core/deps/rcheevos/src/rcheevos/value.c
+			core/deps/rcheevos/src/rhash/aes.c
+			core/deps/rcheevos/src/rhash/cdreader.c
+			core/deps/rcheevos/src/rhash/hash.c
+			core/deps/rcheevos/src/rhash/md5.c
+			core/deps/rcheevos/src/rurl/url.c)
+	target_include_directories(${PROJECT_NAME} PRIVATE core/deps/rcheevos/include)
+	target_compile_definitions(${PROJECT_NAME} PRIVATE USE_RACHIEVEMENTS RC_DISABLE_LUA)
+endif()
 
 target_sources(${PROJECT_NAME} PRIVATE
 		core/wsi/context.h
@@ -1234,33 +1355,35 @@ target_sources(${PROJECT_NAME} PRIVATE
 		core/rend/tileclip.h
 		core/rend/TexCache.cpp
 		core/rend/TexCache.h
+		core/rend/texconv.cpp
+		core/rend/texconv.h
 		core/rend/norend/norend.cpp)
 if(NOT LIBRETRO)
 	target_sources(${PROJECT_NAME} PRIVATE
-			core/rend/game_scanner.h
-			core/rend/imgui_driver.h
-			core/rend/gui.cpp
-			core/rend/gui.h
-			core/rend/gui_android.cpp
-			core/rend/gui_android.h
-			core/rend/gui_chat.h
-			core/rend/gui_cheats.cpp
-			core/rend/gui_util.cpp
-			core/rend/gui_util.h
-			core/rend/mainui.cpp
-			core/rend/mainui.h
-			core/rend/boxart/boxart.cpp
-			core/rend/boxart/boxart.h
-			core/rend/boxart/gamesdb.cpp
-			core/rend/boxart/gamesdb.h
-			core/rend/boxart/http_client.cpp
-			core/rend/boxart/http_client.h
-			core/rend/boxart/scraper.cpp
-			core/rend/boxart/scraper.h)
+			core/ui/game_scanner.cpp
+			core/ui/game_scanner.h
+			core/ui/imgui_driver.h
+			core/ui/gui.cpp
+			core/ui/gui.h
+			core/ui/gui_achievements.cpp
+			core/ui/vgamepad.cpp
+			core/ui/vgamepad.h
+			core/ui/gui_chat.h
+			core/ui/gui_cheats.cpp
+			core/ui/gui_util.cpp
+			core/ui/gui_util.h
+			core/ui/mainui.cpp
+			core/ui/mainui.h
+			core/ui/boxart/boxart.cpp
+			core/ui/boxart/boxart.h
+			core/ui/boxart/gamesdb.cpp
+			core/ui/boxart/gamesdb.h
+			core/ui/boxart/scraper.cpp
+			core/ui/boxart/scraper.h)
 endif()
 
 if(USE_VULKAN)
-	target_compile_definitions(${PROJECT_NAME} PUBLIC VK_NO_PROTOTYPES)
+	target_compile_definitions(${PROJECT_NAME} PUBLIC VK_ENABLE_BETA_EXTENSIONS VK_NO_PROTOTYPES)
 	if(ANDROID)
 		target_compile_definitions(${PROJECT_NAME} PUBLIC VK_USE_PLATFORM_ANDROID_KHR)
 	elseif(X11_FOUND)
@@ -1268,7 +1391,6 @@ if(USE_VULKAN)
 	elseif(WIN32)
 		target_compile_definitions(${PROJECT_NAME} PUBLIC VK_USE_PLATFORM_WIN32_KHR)
 	elseif(APPLE)
-		target_compile_definitions(${PROJECT_NAME} PUBLIC VK_USE_PLATFORM_MACOS_MVK)
 		target_compile_definitions(${PROJECT_NAME} PUBLIC VK_USE_PLATFORM_METAL_EXT)
 	endif()
 
@@ -1276,9 +1398,13 @@ if(USE_VULKAN)
 	target_link_libraries(${PROJECT_NAME} PRIVATE Vulkan::Headers)
 
 	add_subdirectory(core/deps/VulkanMemoryAllocator)
-	target_compile_definitions(VulkanMemoryAllocator INTERFACE $<$<BOOL:${APPLE}>:VMA_USE_STL_SHARED_MUTEX=0>) # Only available on macOS 10.12+
 	target_compile_options(VulkanMemoryAllocator INTERFACE $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:AppleClang,Clang>>:-Wno-nullability-completeness>)
 	target_link_libraries(${PROJECT_NAME} PRIVATE GPUOpen::VulkanMemoryAllocator)
+
+	if(ANDROID AND NOT LIBRETRO AND "arm64" IN_LIST ARCHITECTURE)
+		add_subdirectory(core/deps/libadrenotools)
+		target_link_libraries(${PROJECT_NAME} PRIVATE adrenotools)
+	endif()
 
 	target_compile_definitions(${PROJECT_NAME} PRIVATE USE_VULKAN HAVE_VULKAN)
 	target_sources(${PROJECT_NAME} PRIVATE
@@ -1292,6 +1418,7 @@ if(USE_VULKAN)
 			core/rend/vulkan/oit/oit_renderpass.h
 			core/rend/vulkan/oit/oit_shaders.cpp
 			core/rend/vulkan/oit/oit_shaders.h
+			core/rend/vulkan/adreno.cpp
 			core/rend/vulkan/buffer.cpp
 			core/rend/vulkan/buffer.h
 			core/rend/vulkan/commandpool.cpp
@@ -1495,7 +1622,7 @@ endif()
 if((USE_OPENGL OR USE_GLES2 OR USE_GLES) AND NOT LIBRETRO)
 	add_library(glad STATIC core/deps/glad/src/gl.c)
 	if(NOT APPLE AND NOT WIN32 AND NOT SDL2_FOUND)
-		# When SDL2 is not found, we can use EGL with ANativeWindow (Android), DispmanX (Raspberry Pi) or X11
+		# When SDL2 is not found, we can use EGL with ANativeWindow (Android) or X11
 		target_sources(glad PRIVATE core/deps/glad/src/egl.c)
 	endif()
 	target_include_directories(glad PUBLIC core/deps/glad/include)
@@ -1546,6 +1673,10 @@ if(NOT LIBRETRO)
 		target_sources(${PROJECT_NAME} PRIVATE
 			shell/android-studio/flycast/src/main/jni/src/Android.cpp
 			shell/android-studio/flycast/src/main/jni/src/android_gamepad.h
+			shell/android-studio/flycast/src/main/jni/src/android_storage.h
+			shell/android-studio/flycast/src/main/jni/src/http_client.h
+			shell/android-studio/flycast/src/main/jni/src/jni_util.h
+			shell/android-studio/flycast/src/main/jni/src/android_input.cpp
 			shell/android-studio/flycast/src/main/jni/src/android_keyboard.h)
 
 		target_link_libraries(${PROJECT_NAME} PRIVATE android log)
@@ -1559,6 +1690,7 @@ if(NOT LIBRETRO)
 
 			target_sources(${PROJECT_NAME} PRIVATE
 					shell/apple/common/http_client.mm
+					shell/apple/common/util.mm
 					shell/apple/emulator-ios/emulator/AppDelegate.h
 					shell/apple/emulator-ios/emulator/AppDelegate.mm
 					shell/apple/emulator-ios/emulator/ios_main.mm
@@ -1569,13 +1701,15 @@ if(NOT LIBRETRO)
 					shell/apple/emulator-ios/emulator/FlycastViewController.mm
 					shell/apple/emulator-ios/emulator/PadViewController.h
 					shell/apple/emulator-ios/emulator/PadViewController.mm
+					shell/apple/emulator-ios/emulator/EditPadViewController.h
+					shell/apple/emulator-ios/emulator/EditPadViewController.mm
 					shell/apple/emulator-ios/emulator/EmulatorView.h
 					shell/apple/emulator-ios/emulator/EmulatorView.mm
 					shell/apple/emulator-ios/emulator/main.m
 					shell/apple/emulator-ios/emulator/iCade-iOS/iCadeReaderView.h
 					shell/apple/emulator-ios/emulator/iCade-iOS/iCadeReaderView.m
 					shell/apple/emulator-ios/emulator/iCade-iOS/iCadeState.h)
-			set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fobjc-arc -fmodules")
+			target_compile_options(${PROJECT_NAME} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fobjc-arc -fmodules>)
 			set_source_files_properties(shell/apple/emulator-ios/emulator/FlycastViewController.mm PROPERTIES COMPILE_OPTIONS -fcxx-modules)
 			set_source_files_properties(shell/apple/emulator-ios/emulator/iCade-iOS/iCadeReaderView.m PROPERTIES COMPILE_OPTIONS -fno-objc-arc)
 
@@ -1583,7 +1717,8 @@ if(NOT LIBRETRO)
 				shell/apple/emulator-ios/emulator/Images.xcassets
 				shell/apple/emulator-ios/emulator/FlycastStoryboard.storyboard
 				shell/apple/emulator-ios/emulator/LaunchScreen.storyboard
-				shell/apple/emulator-ios/emulator/PadViewController.xib)
+				shell/apple/emulator-ios/emulator/PadViewController.xib
+				shell/apple/emulator-ios/emulator/EditPadViewController.xib)
 			target_sources(${PROJECT_NAME} PRIVATE ${IOS_RESOURCES})
 			source_group("Resources" FILES ${IOS_RESOURCES})
 			set_source_files_properties(${IOS_RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
@@ -1641,19 +1776,14 @@ if(NOT LIBRETRO)
 
 			add_subdirectory(core/deps/Syphon)
 			target_link_libraries(${PROJECT_NAME} PRIVATE Syphon)
-			if(${CMAKE_GENERATOR} MATCHES "^Xcode.*")
-				add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-					COMMAND ${CMAKE_COMMAND} -E copy ${SYPHON_METALLIB}
-					${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/Flycast.app/Contents/Resources/)
-			else()
-				add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-					COMMAND ${CMAKE_COMMAND} -E copy ${SYPHON_METALLIB}
-					${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/Flycast.app/Contents/Resources/)
-			endif()
+			add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+				COMMAND ${CMAKE_COMMAND} -E copy ${SYPHON_METALLIB}
+				$<TARGET_FILE_DIR:flycast>/../Resources/)
 			target_compile_definitions(${PROJECT_NAME} PRIVATE VIDEO_ROUTING)
 
 			target_sources(${PROJECT_NAME} PRIVATE
 					shell/apple/common/http_client.mm
+					shell/apple/common/util.mm
 					shell/apple/emulator-osx/emulator-osx/SDLApplicationDelegate.h
 					shell/apple/emulator-osx/emulator-osx/SDLApplicationDelegate.mm
 					shell/apple/emulator-osx/emulator-osx/osx-main.mm)
@@ -1699,28 +1829,22 @@ if(NOT LIBRETRO)
 				${IOSURFACE_LIBRARY}
 				${MULTITOUCH_SUPPORT_LIBRARY})
 
-			if(${CMAKE_GENERATOR} MATCHES "^Xcode.*")
-				add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-					COMMAND ${CMAKE_COMMAND} -E copy "$ENV{VULKAN_SDK}/lib/libMoltenVK.dylib"
-					${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/Flycast.app/Contents/Frameworks/libvulkan.dylib)
-			else()
-				add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-					COMMAND ${CMAKE_COMMAND} -E copy "$ENV{VULKAN_SDK}/lib/libMoltenVK.dylib"
-					${CMAKE_CURRENT_BINARY_DIR}/Flycast.app/Contents/Frameworks/libvulkan.dylib)
-			endif()
+			add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+				COMMAND ${CMAKE_COMMAND} -E copy "$ENV{VULKAN_SDK}/lib/libMoltenVK.dylib"
+				$<TARGET_FILE_DIR:flycast>/../Frameworks/libvulkan.dylib)
 		endif()
-	elseif(UNIX OR NINTENDO_SWITCH)
+	elseif(UNIX)
 		if(NOT BUILD_TESTING)
 			target_sources(${PROJECT_NAME} PRIVATE
 					core/linux-dist/main.cpp)
 		endif()
 	elseif(WIN32)
+		target_sources(${PROJECT_NAME} PRIVATE
+			core/windows/clock.c
+			core/windows/rawinput.cpp
+			core/windows/rawinput.h)
 		if(NOT BUILD_TESTING)
-			target_sources(${PROJECT_NAME} PRIVATE
-				core/windows/clock.c
-				core/windows/rawinput.cpp
-				core/windows/rawinput.h
-				core/windows/winmain.cpp)
+			target_sources(${PROJECT_NAME} PRIVATE core/windows/winmain.cpp)
 		endif()
 		if(WINDOWS_STORE)
 			file(READ shell/uwp/Package.appxmanifest MANIFEST)
@@ -1737,11 +1861,13 @@ if(NOT LIBRETRO)
 					core/deps/SDL/src/main/winrt/SDL2-WinRTResources.rc)
 			target_sources(${PROJECT_NAME} PRIVATE
 				${ResourceFiles}
-				core/deps/SDL/src/main/winrt/SDL_winrt_main_NonXAML.cpp
 				shell/uwp/http_client.cpp)
+			if(NOT BUILD_TESTING)
+				target_sources(${PROJECT_NAME} PRIVATE core/deps/SDL/src/main/winrt/SDL_winrt_main_NonXAML.cpp)
+			endif()
 			set_target_properties(${PROJECT_NAME} PROPERTIES RESOURCE "${ResourceFiles}")
 		else()
-			if("x86" IN_LIST ARCHITECTURE OR "x86_64" IN_LIST ARCHITECTURE)
+			if(NOT BUILD_TESTING AND ("x86" IN_LIST ARCHITECTURE OR "x86_64" IN_LIST ARCHITECTURE))
 				target_include_directories(${PROJECT_NAME} PRIVATE core/deps/Spout/SPOUTSDK/SpoutGL)
 				target_include_directories(${PROJECT_NAME} PRIVATE core/deps/Spout/SPOUTSDK/SpoutDirectX/SpoutDX)
 				SET(SPOUT_BUILD_CMT OFF CACHE BOOL "For Visual Studio - build /MT to link runtime libraries" FORCE)
@@ -1760,9 +1886,13 @@ if(NOT LIBRETRO)
 endif()
 
 if(BUILD_TESTING)
-	target_sources(${PROJECT_NAME} PRIVATE
-			core/deps/gtest/src/gtest-all.cc
-			core/deps/gtest/src/gtest_main.cc)
+	option(BUILD_GMOCK "Builds the googlemock subproject" OFF)
+	option(INSTALL_GTEST "Enable installation of googletest. (Projects embedding googletest may want to turn this OFF.)" OFF)
+	if(WIN32)
+		set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+	endif()
+	add_subdirectory(core/deps/googletest EXCLUDE_FROM_ALL)
+	target_link_libraries(${PROJECT_NAME} PRIVATE GTest::gtest_main)
 
 	target_sources(${PROJECT_NAME} PRIVATE
 			tests/src/CheatManagerTest.cpp

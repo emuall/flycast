@@ -24,6 +24,7 @@
 #include "oslib/oslib.h"
 #include "rend/transform_matrix.h"
 #include "texture.h"
+#include <set>
 
 #if VULKAN_HPP_DISPATCH_LOADER_DYNAMIC == 1
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
@@ -71,6 +72,9 @@ bool VkCreateDevice(retro_vulkan_context* context, VkInstance instance, VkPhysic
 			physicalDevice = vkinstance.enumeratePhysicalDevices().front();
 	}
 	context->gpu = (VkPhysicalDevice)physicalDevice;
+
+	const vk::PhysicalDeviceProperties physicalDeviceProperties = physicalDevice.getProperties();
+
 	std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
 
 	// get the first index into queueFamilyProperties which supports graphics and compute
@@ -124,54 +128,116 @@ bool VkCreateDevice(retro_vulkan_context* context, VkInstance instance, VkPhysic
 			DEBUG_LOG(RENDERER, "Using distinct Graphics and Present queue families");
 	}
 
-	vk::PhysicalDeviceFeatures supportedFeatures;
-	physicalDevice.getFeatures(&supportedFeatures);
-	bool fragmentStoresAndAtomics = supportedFeatures.fragmentStoresAndAtomics;
-	VulkanContext::Instance()->samplerAnisotropy = supportedFeatures.samplerAnisotropy;
+
+	std::set<std::string> supportedExtensions;
+
+	const auto deviceExtensionProperties = physicalDevice.enumerateDeviceExtensionProperties();
+	for (const auto& property : deviceExtensionProperties)
+	{
+		supportedExtensions.insert(property.extensionName);
+	}
+
+	std::vector<const char*> enabledExtensions;
+
+	const auto tryAddDeviceExtension = [&supportedExtensions = std::as_const(supportedExtensions), &enabledExtensions]
+	(std::string_view extensionName) -> bool
+		{
+			if (supportedExtensions.count(extensionName.data()))
+			{
+				enabledExtensions.push_back(extensionName.data());
+				NOTICE_LOG(RENDERER, "Device extension enabled: %s", extensionName.data());
+				return true;
+			}
+			NOTICE_LOG(RENDERER, "Device extension unavailable: %s", extensionName.data());
+			return false;
+		};
+
+	// Required swapchain extension
+	tryAddDeviceExtension(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 
 	// Enable VK_KHR_dedicated_allocation if available
-	bool getMemReq2Supported = false;
-	VulkanContext::Instance()->dedicatedAllocationSupported = false;
-	std::vector<const char *> deviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
-	for (unsigned i = 0; i < num_required_device_extensions; i++)
-		deviceExtensions.push_back(required_device_extensions[i]);
-	for (const auto& property : physicalDevice.enumerateDeviceExtensionProperties())
+	if (physicalDeviceProperties.apiVersion >= VK_API_VERSION_1_1)
 	{
-		if (!strcmp(property.extensionName, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME))
+		// Core in Vulkan 1.1
+		VulkanContext::Instance()->dedicatedAllocationSupported = true;
+	}
+	else
+	{
+		const bool getMemReq2Supported = tryAddDeviceExtension(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+		if (getMemReq2Supported)
 		{
-			deviceExtensions.push_back(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
-			getMemReq2Supported = true;
-		}
-		else if (!strcmp(property.extensionName, VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME))
-		{
-			deviceExtensions.push_back(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
-			VulkanContext::Instance()->dedicatedAllocationSupported = true;
+			VulkanContext::Instance()->dedicatedAllocationSupported = tryAddDeviceExtension(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
 		}
 	}
-	VulkanContext::Instance()->dedicatedAllocationSupported &= getMemReq2Supported;
+
+	// Check for VK_KHR_get_physical_device_properties2
+	// Core as of Vulkan 1.1
+	const bool getPhysicalDeviceProperties2Supported =
+		(physicalDeviceProperties.apiVersion >= VK_API_VERSION_1_1)
+		? true : tryAddDeviceExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+
+	if (getPhysicalDeviceProperties2Supported)
+	{
+		// Enable VK_EXT_provoking_vertex if available
+		VulkanContext::Instance()->provokingVertexSupported = tryAddDeviceExtension(VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
+	}
+
+	// Get device features
+
+	vk::PhysicalDeviceFeatures2 featuresChain{};
+	vk::PhysicalDeviceFeatures& features = featuresChain.features;
+
+	vk::PhysicalDeviceProvokingVertexFeaturesEXT provokingVertexFeatures{};
+	if (VulkanContext::Instance()->provokingVertexSupported)
+	{
+		featuresChain.pNext = &provokingVertexFeatures;
+	}
+
+	// Get the physical device's features
+	if (getPhysicalDeviceProperties2Supported && featuresChain.pNext)
+	{
+		physicalDevice.getFeatures2(&featuresChain);
+	}
+	else
+	{
+		physicalDevice.getFeatures(&features);
+	}
+
+	if (VulkanContext::Instance()->provokingVertexSupported)
+	{
+		VulkanContext::Instance()->provokingVertexSupported &= provokingVertexFeatures.provokingVertexLast;
+	}
+
+	VulkanContext::Instance()->samplerAnisotropy = features.samplerAnisotropy;
+	VulkanContext::Instance()->fragmentStoresAndAtomics = features.fragmentStoresAndAtomics;
 
 	// create a Device
 	float queuePriority = 1.0f;
-	vk::DeviceQueueCreateInfo deviceQueueCreateInfos[] = {
+	vk::DeviceQueueCreateInfo deviceQueueCreateInfo[] = {
 			vk::DeviceQueueCreateInfo(vk::DeviceQueueCreateFlags(), context->queue_family_index, 1, &queuePriority),
 			vk::DeviceQueueCreateInfo(vk::DeviceQueueCreateFlags(), context->presentation_queue_family_index, 1, &queuePriority),
 	};
-	vk::PhysicalDeviceFeatures features(*required_features);
-	if (fragmentStoresAndAtomics)
-		features.fragmentStoresAndAtomics = true;
-	if (VulkanContext::Instance()->samplerAnisotropy)
-		features.samplerAnisotropy = true;
-	vk::Device device = physicalDevice.createDevice(vk::DeviceCreateInfo(vk::DeviceCreateFlags(),
-			context->queue_family_index == context->presentation_queue_family_index ? 1 : 2, deviceQueueCreateInfos,
-					num_required_device_layers, required_device_layers, deviceExtensions.size(), &deviceExtensions[0], &features));
-	context->device = (VkDevice)device;
+	bool singleQueue = context->queue_family_index == context->presentation_queue_family_index;
+	vk::DeviceCreateInfo deviceCreateInfo;
+	if (singleQueue)
+		deviceCreateInfo = vk::DeviceCreateInfo(vk::DeviceCreateFlags(), deviceQueueCreateInfo[0], nullptr, enabledExtensions);
+	else
+		deviceCreateInfo = vk::DeviceCreateInfo(vk::DeviceCreateFlags(), deviceQueueCreateInfo, nullptr, enabledExtensions);
+
+	if (getPhysicalDeviceProperties2Supported)
+		deviceCreateInfo.pNext = &featuresChain;
+	else
+		deviceCreateInfo.setPEnabledFeatures(&features);
+	vk::Device newDevice = physicalDevice.createDevice(deviceCreateInfo);
+
+	context->device = (VkDevice)newDevice;
 #if VULKAN_HPP_DISPATCH_LOADER_DYNAMIC == 1
 	VULKAN_HPP_DEFAULT_DISPATCHER.init(context->device);
 #endif
 
 	// Queues
-	context->queue = (VkQueue)device.getQueue(context->queue_family_index, 0);
-	context->presentation_queue = (VkQueue)device.getQueue(context->presentation_queue_family_index, 0);
+	context->queue = (VkQueue)newDevice.getQueue(context->queue_family_index, 0);
+	context->presentation_queue = (VkQueue)newDevice.getQueue(context->presentation_queue_family_index, 0);
 
 	return true;
 }
@@ -329,7 +395,7 @@ void VulkanContext::PresentFrame(vk::Image image, vk::ImageView imageView, const
 	getVideoShift(shiftX, shiftY);
 
 	beginFrame(extent);
-	QuadVertex vtx[] {
+	QuadVertex vtx[4] {
 		{ -1, -1, 0, 0, 0 },
 		{  1, -1, 0, 1, 0 },
 		{ -1,  1, 0, 0, 1 },
@@ -367,13 +433,13 @@ void VulkanContext::beginFrame(vk::Extent2D extent)
 		vk::Extent2D caExtent = colorAttachments[currentImage]->getExtent();
 		if (extent != caExtent)
 		{
-			colorAttachments[currentImage].reset();
-			framebuffers[currentImage].reset();
+			addToFlight(new Deleter(std::move(colorAttachments[currentImage])));
+			addToFlight(new Deleter(std::move(framebuffers[currentImage])));
 		}
 	}
 	commandPool.BeginFrame();
 	const std::array<vk::ClearValue, 2> clear_colors = { getBorderColor(), vk::ClearDepthStencilValue{ 0.f, 0 } };
-	cmdBuffer = commandPool.Allocate();
+	cmdBuffer = commandPool.Allocate(true);
 	cmdBuffer.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit));
 	overlay->Prepare(cmdBuffer, true, true);
 

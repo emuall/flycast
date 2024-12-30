@@ -1,10 +1,13 @@
-#include "gtest/gtest.h"
 #include "types.h"
+
+#if FEAT_AREC != DYNAREC_NONE
 #include "hw/mem/addrspace.h"
 #include "hw/arm7/arm7.h"
 #include "hw/aica/aica_if.h"
 #include "hw/arm7/arm7_rec.h"
 #include "emulator.h"
+
+#include "gtest/gtest.h"
 
 static const u32 N_FLAG = 1 << 31;
 static const u32 Z_FLAG = 1 << 30;
@@ -24,7 +27,7 @@ protected:
 		if (!addrspace::reserve())
 			die("addrspace::reserve failed");
 		emu.init();
-		dc_reset(true);
+		emu.dc_reset(true);
 		Arm7Enabled = true;
 	}
 
@@ -1083,3 +1086,4 @@ TEST_F(AicaArmTest, ConditionRegAllocTest)
 	ASSERT_EQ(arm_Reg[2].I, 22);
 }
 }
+#endif

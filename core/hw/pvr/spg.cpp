@@ -1,13 +1,13 @@
-#include <array>
 #include "spg.h"
 #include "hw/holly/holly_intc.h"
 #include "hw/holly/sb.h"
 #include "hw/sh4/sh4_sched.h"
-#include "oslib/oslib.h"
 #include "hw/maple/maple_if.h"
 #include "serialize.h"
 #include "network/ggpo.h"
 #include "hw/pvr/Renderer_if.h"
+#include "stdclass.h"
+#include <array>
 
 #ifdef TEST_AUTOMATION
 #include "input/gamepad_device.h"
@@ -21,7 +21,7 @@ static u32 prv_cur_scanline = -1;
 
 #if !defined(NDEBUG) || defined(DEBUGFAST)
 static u32 vblk_cnt;
-static float last_fps;
+static u64 last_fps;
 #endif
 
 // 27 mhz pixel clock
@@ -156,17 +156,18 @@ static int spg_line_sched(int tag, int cycles, int jitter, void *arg)
 
 			rend_vblank();
 
-			double now = os_GetSeconds() * 1000000.0;
+			u64 now = getTimeMs();
 			cpu_time_idx = (cpu_time_idx + 1) % cpu_cycles.size();
 			if (cpu_cycles[cpu_time_idx] != 0)
 			{
 				u32 cycle_span = (u32)(sh4_sched_now64() - cpu_cycles[cpu_time_idx]);
-				double time_span = now - real_times[cpu_time_idx];
-				double cpu_speed = ((double)cycle_span / time_span) / (SH4_MAIN_CLOCK / 100000000);
-				SH4FastEnough = cpu_speed >= 85.0;
+				u64 time_span = now - real_times[cpu_time_idx];
+				float cpu_speed = ((float)cycle_span / time_span) / (SH4_MAIN_CLOCK / 100000);
+				SH4FastEnough = cpu_speed >= 85.f;
 			}
-			else
+			else {
 				SH4FastEnough = false;
+			}
 			cpu_cycles[cpu_time_idx] = sh4_sched_now64();
 			real_times[cpu_time_idx] = now;
 
@@ -176,15 +177,15 @@ static int spg_line_sched(int tag, int cycles, int jitter, void *arg)
 
 #if !defined(NDEBUG) || defined(DEBUGFAST)
 			vblk_cnt++;
-			if ((os_GetSeconds()-last_fps)>2)
+			if (getTimeMs() - last_fps >= 2000)
 			{
 				static int Last_FC;
-				double ts=os_GetSeconds()-last_fps;
-				double spd_fps=(FrameCount-Last_FC)/ts;
-				double spd_vbs=vblk_cnt/ts;
-				double spd_cpu=spd_vbs*Frame_Cycles;
-				spd_cpu/=1000000;	//mrhz kthx
-				double fullvbs=(spd_vbs/spd_cpu)*200;
+				double ts = ((double)getTimeMs() - last_fps) / 1000.0;
+				double spd_fps = (FrameCount - Last_FC) / ts;
+				double spd_vbs = vblk_cnt / ts;
+				double spd_cpu = spd_vbs * Frame_Cycles;
+				spd_cpu /= 1000000.0;	//mrhz kthx
+				double fullvbs = (spd_vbs / spd_cpu) * 200.0;
 
 				Last_FC=FrameCount;
 
@@ -210,13 +211,13 @@ static int spg_line_sched(int tag, int cycles, int jitter, void *arg)
 
 				double full_rps = spd_fps + fskip / ts;
 
-				INFO_LOG(COMMON, "%s/%c - %4.2f - %4.2f - V: %4.2f (%.2f, %s%s%4.2f) R: %4.2f+%4.2f",
-					VER_SHORTNAME,'n',mspdf,spd_cpu*100/200,spd_vbs,
-					spd_vbs/full_rps,mode,res,fullvbs,
-					spd_fps,fskip/ts);
+				INFO_LOG(COMMON, "SPG - %4.2f - %4.2f - V: %4.2f (%.2f, %s%s%4.2f) R: %4.2f+%4.2f",
+					mspdf, spd_cpu * 100 / 200, spd_vbs,
+					spd_vbs / full_rps, mode, res, fullvbs,
+					spd_fps, fskip / ts);
 				
-				fskip=0;
-				last_fps=os_GetSeconds();
+				fskip = 0;
+				last_fps = getTimeMs();
 			}
 #endif
 		}
@@ -234,7 +235,7 @@ static int spg_line_sched(int tag, int cycles, int jitter, void *arg)
 
 void read_lightgun_position(int x, int y)
 {
-	static u8 flip;
+	static u32 flip;
 	maple_int_pending = true;
 	if (y < 0 || y >= 480 || x < 0 || x >= 640)
 	{
@@ -244,9 +245,11 @@ void read_lightgun_position(int x, int y)
 	else
 	{
 		lightgun_line = y / (SPG_CONTROL.interlace ? 2 : 1) + SPG_VBLANK_INT.vblank_out_interrupt_line_number;
-		// For some reason returning the same position twice makes it register off screen
-		lightgun_hpos = (x + 286) ^ flip;
-		flip ^= 1;
+		// For some reason returning the same position twice makes it register off screen.
+		// Atomiswave Clay Challenge wants more wiggle than others for shots to register.
+		lightgun_line ^= (flip >> 1) & 1;
+		lightgun_hpos = (x + 286) ^ (flip & 1);
+		flip++;
 	}
 }
 
@@ -314,19 +317,11 @@ void spg_Deserialize(Deserializer& deser)
 	if (deser.version() < Deserializer::V30)
 		deser.skip<u32>(); // in_vblank
 	deser >> clc_pvr_scanline;
-	if (deser.version() >= Deserializer::V12)
-	{
-		deser >> maple_int_pending;
-		if (deser.version() >= Deserializer::V14)
-		{
-			deser >> pvr_numscanlines;
-			deser >> prv_cur_scanline;
-			deser >> Line_Cycles;
-			deser >> Frame_Cycles;
-			deser >> lightgun_line;
-			deser >> lightgun_hpos;
-		}
-	}
-	if (deser.version() < Deserializer::V14)
-		CalculateSync();
+	deser >> maple_int_pending;
+	deser >> pvr_numscanlines;
+	deser >> prv_cur_scanline;
+	deser >> Line_Cycles;
+	deser >> Frame_Cycles;
+	deser >> lightgun_line;
+	deser >> lightgun_hpos;
 }

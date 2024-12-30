@@ -25,7 +25,8 @@
 #include "rend/transform_matrix.h"
 #include "d3d_texture.h"
 #include "d3d_shaders.h"
-#include "rend/imgui_driver.h"
+#include "ui/imgui_driver.h"
+#include "rend/tileclip.h"
 
 class RenderStateCache
 {
@@ -105,17 +106,17 @@ struct D3DRenderer : public Renderer
 	bool RenderLastFrame() override;
 	bool Present() override
 	{
-		if (!frameRendered)
+		if (!frameRendered || clearLastFrame)
 			return false;
 		imguiDriver->setFrameRendered();
 		frameRendered = false;
 		return true;
 	}
-	void DrawOSD(bool clear_screen) override;
 	BaseTextureCacheData *GetTexture(TSP tsp, TCW tcw) override;
 	void preReset();
 	void postReset();
 	void RenderFramebuffer(const FramebufferInfo& info) override;
+	bool GetLastFrame(std::vector<u8>& data, int& width, int& height) override;
 
 private:
 	enum ModifierVolumeMode { Xor, Or, Inclusion, Exclusion, ModeCount };
@@ -139,6 +140,8 @@ private:
 	void prepareRttRenderTarget(u32 texAddress, int& vpWidth, int& vpHeight);
 	void readRttRenderTarget(u32 texAddress);
 	void writeFramebufferToVRAM();
+	void drawOSD();
+	TileClipping setTileClip(u32 tileclip, int rect[4]);
 
 	RenderStateCache devCache;
 	ComPtr<IDirect3DDevice9> device;

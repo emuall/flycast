@@ -385,6 +385,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "16",   NULL },
          { "32",   NULL },
          { "64",   NULL },
+         { "96",   NULL },
          { "128",   NULL },
          { NULL, NULL },
       },
@@ -505,7 +506,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "enabled",  NULL },
          { NULL, NULL },
       },
-      "disabled",
+      "enabled",
    },
    {
       CORE_OPTION_NAME "_detect_vsync_swap_interval",
@@ -1099,9 +1100,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       CORE_OPTION_NAME "_per_content_vmus",
       "Per-Game Visual Memory Units/Systems (VMU)",
       "Per-Game VMUs",
-      "When disabled, all games share up to 8 VMU save files (A1/A2/B1/B2/C1/C2/D1/D2) located in RetroArch's system directory.\n"
-      "The 'VMU A1' setting creates a unique VMU 'A1' file in RetroArch's save directory for each game that is launched.\n"
-      "The 'All VMUs' setting creates up to 8 unique VMU files (A1/A2/B1/B2/C1/C2/D1/D2) for each game that is launched.",
+      "When disabled, all games share up to 8 VMU save files (A1/A2/B1/B2/C1/C2/D1/D2) located in RetroArch's system folder.\nThe 'VMU A1' setting creates a unique VMU 'A1' file in RetroArch's save folder for each game that is launched.\nThe 'All VMUs' setting creates up to 8 unique VMU files (A1/A2/B1/B2/C1/C2/D1/D2) for each game that is launched.",
       NULL,
       "vmu",
       {
@@ -1768,7 +1767,7 @@ struct retro_core_options_v2 *options_intl[RETRO_LANGUAGE_LAST] = {
    &options_nl,      /* RETRO_LANGUAGE_DUTCH */
    &options_pt_br,   /* RETRO_LANGUAGE_PORTUGUESE_BRAZIL */
    &options_pt_pt,   /* RETRO_LANGUAGE_PORTUGUESE_PORTUGAL */
-   &options_ru,      /* RETRO_LANGUAGE_RUSSIAN */
+   NULL,             /* RETRO_LANGUAGE_RUSSIAN */
    &options_ko,      /* RETRO_LANGUAGE_KOREAN */
    &options_cht,     /* RETRO_LANGUAGE_CHINESE_TRADITIONAL */
    &options_chs,     /* RETRO_LANGUAGE_CHINESE_SIMPLIFIED */

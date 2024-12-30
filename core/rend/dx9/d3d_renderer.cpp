@@ -19,8 +19,7 @@
 #include "d3d_renderer.h"
 #include "hw/pvr/ta.h"
 #include "hw/pvr/pvr_mem.h"
-#include "rend/tileclip.h"
-#include "rend/gui.h"
+#include "ui/gui.h"
 #include "rend/sorter.h"
 
 const u32 DstBlendGL[]
@@ -140,8 +139,7 @@ bool D3DRenderer::Init()
 	success &= (bool)shaders.getVertexShader(true);
 	success &= SUCCEEDED(device->CreateTexture(32, 32, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &paletteTexture.get(), 0));
 	success &= SUCCEEDED(device->CreateTexture(128, 2, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8, D3DPOOL_DEFAULT, &fogTexture.get(), 0));
-	fog_needs_update = true;
-	forcePaletteUpdate();
+	updateFogTable = true;
 
 	if (!success)
 	{
@@ -201,8 +199,8 @@ void D3DRenderer::postReset()
 	verify(rc);
 	rc = SUCCEEDED(device->CreateTexture(128, 2, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8, D3DPOOL_DEFAULT, &fogTexture.get(), 0));
 	verify(rc);
-	fog_needs_update = true;
-	forcePaletteUpdate();
+	updateFogTable = true;
+	updatePalette = true;
 }
 
 void D3DRenderer::Term()
@@ -301,9 +299,10 @@ void D3DRenderer::RenderFramebuffer(const FramebufferInfo& info)
 
 	aspectRatio = getDCFramebufferAspectRatio();
 	displayFramebuffer();
-	DrawOSD(false);
+	drawOSD();
 	frameRendered = true;
 	frameRenderedOnce = true;
+	clearLastFrame = false;
 	theDXContext.setFrameRendered();
 }
 
@@ -317,8 +316,10 @@ void D3DRenderer::Process(TA_context* ctx)
 	if (settings.platform.isNaomi2())
 		throw FlycastException("DirectX 9 doesn't support Naomi 2 games. Select a different graphics API");
 
-	if (KillTex)
+	if (resetTextureCache) {
 		texCache.Clear();
+		resetTextureCache = false;
+	}
 	texCache.Cleanup();
 
 	ta_parse(ctx, false);
@@ -335,6 +336,25 @@ inline void D3DRenderer::setTexMode(D3DSAMPLERSTATETYPE state, u32 clamp, u32 mi
 		else
 			devCache.SetSamplerState(0, state, D3DTADDRESS_WRAP);
 	}
+}
+
+TileClipping D3DRenderer::setTileClip(u32 tileclip, int clip_rect[4])
+{
+	TileClipping clipmode = GetTileClip(tileclip, matrices.GetViewportMatrix(), clip_rect);
+	if (clipmode == TileClipping::Outside)
+	{
+		devCache.SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
+		RECT rect { clip_rect[0], clip_rect[1], clip_rect[0] + clip_rect[2], clip_rect[1] + clip_rect[3] };
+		// TODO cache
+		device->SetScissorRect(&rect);
+	}
+	else
+	{
+		devCache.SetRenderState(D3DRS_SCISSORTESTENABLE, scissorEnable);
+		if (scissorEnable)
+			device->SetScissorRect(&scissorRect);
+	}
+	return clipmode;
 }
 
 template <u32 Type, bool SortingEnabled>
@@ -355,7 +375,7 @@ void D3DRenderer::setGPState(const PolyParam *gp)
 	int fog_ctrl = config::Fog ? gp->tsp.FogCtrl : 2;
 
 	int clip_rect[4] = {};
-	TileClipping clipmode = GetTileClip(gp->tileclip, matrices.GetViewportMatrix(), clip_rect);
+	TileClipping clipmode = setTileClip(gp->tileclip, clip_rect);
 	D3DTexture *texture = (D3DTexture *)gp->texture;
 	int gpuPalette = texture == nullptr || !texture->gpuPalette ? 0
 			: gp->tsp.FilterMode + 1;
@@ -401,23 +421,10 @@ void D3DRenderer::setGPState(const PolyParam *gp)
 	devCache.SetVertexShader(shaders.getVertexShader(gp->pcw.Gouraud));
 	devCache.SetRenderState(D3DRS_SHADEMODE, gp->pcw.Gouraud == 1 ? D3DSHADE_GOURAUD : D3DSHADE_FLAT);
 
-	if (clipmode == TileClipping::Outside)
+	if (clipmode == TileClipping::Inside)
 	{
-		devCache.SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
-		RECT rect { clip_rect[0], clip_rect[1], clip_rect[0] + clip_rect[2], clip_rect[1] + clip_rect[3] };
-		// TODO cache
-		device->SetScissorRect(&rect);
-	}
-	else
-	{
-		devCache.SetRenderState(D3DRS_SCISSORTESTENABLE, scissorEnable);
-		if (scissorEnable)
-			device->SetScissorRect(&scissorRect);
-		if (clipmode == TileClipping::Inside)
-		{
-			float f[] = { (float)clip_rect[0], (float)clip_rect[1], (float)(clip_rect[0] + clip_rect[2]), (float)(clip_rect[1] + clip_rect[3]) };
-			device->SetPixelShaderConstantF(4, f, 1);
-		}
+		float f[] = { (float)clip_rect[0], (float)clip_rect[1], (float)(clip_rect[0] + clip_rect[2]), (float)(clip_rect[1] + clip_rect[3]) };
+		device->SetPixelShaderConstantF(4, f, 1);
 	}
 
 	const u32 stencil = (gp->pcw.Shadow != 0) ? 0x80 : 0;
@@ -707,6 +714,10 @@ void D3DRenderer::drawModVols(int first, int count)
 			setMVS_Mode(Or, param.isp);		// OR'ing (open volume or quad)
 		else
 			setMVS_Mode(Xor, param.isp);	// XOR'ing (closed volume)
+
+		int clip_rect[4] = {};
+		setTileClip(param.tileclip, clip_rect);
+		//TODO inside clipping
 
 		device->DrawPrimitive(D3DPT_TRIANGLELIST, param.first * 3, param.count);
 
@@ -1168,9 +1179,10 @@ bool D3DRenderer::Render()
 	{
 		aspectRatio = getOutputFramebufferAspectRatio();
 		displayFramebuffer();
-		DrawOSD(false);
+		drawOSD();
 		frameRendered = true;
 		frameRenderedOnce = true;
+		clearLastFrame = false;
 		theDXContext.setFrameRendered();
 	}
 
@@ -1271,7 +1283,7 @@ void D3DRenderer::displayFramebuffer()
 
 bool D3DRenderer::RenderLastFrame()
 {
-	if (!frameRenderedOnce || !theDXContext.isReady())
+	if (clearLastFrame || !frameRenderedOnce || !theDXContext.isReady())
 		return false;
 	backbuffer.reset();
 	bool rc = SUCCEEDED(device->GetRenderTarget(0, &backbuffer.get()));
@@ -1284,9 +1296,9 @@ bool D3DRenderer::RenderLastFrame()
 
 void D3DRenderer::updatePaletteTexture()
 {
-	if (!palette_updated)
+	if (!updatePalette)
 		return;
-	palette_updated = false;
+	updatePalette = false;
 
 	D3DLOCKED_RECT rect;
 	bool rc = SUCCEEDED(paletteTexture->LockRect(0, &rect, nullptr, 0));
@@ -1308,9 +1320,9 @@ void D3DRenderer::updatePaletteTexture()
 
 void D3DRenderer::updateFogTexture()
 {
-	if (!fog_needs_update || !config::Fog)
+	if (!updateFogTable || !config::Fog)
 		return;
-	fog_needs_update = false;
+	updateFogTable = false;
 	u8 temp_tex_buffer[256];
 	MakeFogTexture(temp_tex_buffer);
 
@@ -1331,9 +1343,9 @@ void D3DRenderer::updateFogTexture()
 	device->SetSamplerState(2, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
 }
 
-void D3DRenderer::DrawOSD(bool clear_screen)
+void D3DRenderer::drawOSD()
 {
-	theDXContext.setOverlay(!clear_screen);
+	theDXContext.setOverlay(true);
 	gui_display_osd();
 	theDXContext.setOverlay(false);
 }
@@ -1420,6 +1432,105 @@ void D3DRenderer::writeFramebufferToVRAM()
 	yClip.min = std::min(yClip.min, height - 1);
 	yClip.max = std::min(yClip.max, height - 1);
 	WriteFramebuffer<2, 1, 0, 3>(width, height, (u8 *)tmp_buf.data(), texAddress, pvrrc.fb_W_CTRL, linestride, xClip, yClip);
+}
+
+bool D3DRenderer::GetLastFrame(std::vector<u8>& data, int& width, int& height)
+{
+	if (!frameRenderedOnce || !theDXContext.isReady())
+		return false;
+
+	if (width != 0) {
+		height = width / aspectRatio;
+	}
+	else if (height != 0) {
+		width = aspectRatio * height;
+	}
+	else
+	{
+		width = this->width;
+		height = this->height;
+		if (config::Rotate90)
+			std::swap(width, height);
+		// We need square pixels for PNG
+		int w = aspectRatio * height;
+		if (width > w)
+			height = width / aspectRatio;
+		else
+			width = w;
+	}
+
+	backbuffer.reset();
+	device->GetRenderTarget(0, &backbuffer.get());
+
+	// Target texture and surface
+	ComPtr<IDirect3DTexture9> target;
+	device->CreateTexture(width, height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &target.get(), NULL);
+	ComPtr<IDirect3DSurface9> surface;
+	target->GetSurfaceLevel(0, &surface.get());
+	device->SetRenderTarget(0, surface);
+	// Draw
+	devCache.SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+	device->SetPixelShader(NULL);
+	device->SetVertexShader(NULL);
+	device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+	device->SetRenderState(D3DRS_ZENABLE, FALSE);
+	device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+	device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+	device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+	device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+
+	glm::mat4 identity = glm::identity<glm::mat4>();
+	glm::mat4 projection = glm::translate(glm::vec3(-1.f / width, 1.f / height, 0));
+	if (config::Rotate90)
+		projection *= glm::rotate((float)M_PI_2, glm::vec3(0, 0, 1));
+
+	device->SetTransform(D3DTS_WORLD, (const D3DMATRIX *)&identity[0][0]);
+	device->SetTransform(D3DTS_VIEW, (const D3DMATRIX *)&identity[0][0]);
+	device->SetTransform(D3DTS_PROJECTION, (const D3DMATRIX *)&projection[0][0]);
+
+	device->SetFVF(D3DFVF_XYZ | D3DFVF_TEX1);
+	D3DVIEWPORT9 viewport{};
+	viewport.Width = width;
+	viewport.Height = height;
+	viewport.MaxZ = 1;
+	bool rc = SUCCEEDED(device->SetViewport(&viewport));
+	verify(rc);
+	float coords[] {
+		-1,  1, 0.5f,  0, 0,
+		-1, -1, 0.5f,  0, 1,
+		 1,  1, 0.5f,  1, 0,
+		 1, -1, 0.5f,  1, 1,
+	};
+	device->SetTexture(0, framebufferTexture);
+	device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, coords, sizeof(float) * 5);
+
+	// Copy back
+	ComPtr<IDirect3DSurface9> offscreenSurface;
+	rc = SUCCEEDED(device->CreateOffscreenPlainSurface(width, height, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &offscreenSurface.get(), nullptr));
+	verify(rc);
+	rc = SUCCEEDED(device->GetRenderTargetData(surface, offscreenSurface));
+	verify(rc);
+
+	D3DLOCKED_RECT rect;
+	RECT lockRect { 0, 0, (long)width, (long)height };
+	rc = SUCCEEDED(offscreenSurface->LockRect(&rect, &lockRect, D3DLOCK_READONLY));
+	verify(rc);
+	data.clear();
+	data.reserve(width * height * 3);
+	for (int y = 0; y < height; y++)
+	{
+		const u8 *src = (const u8 *)rect.pBits + y * rect.Pitch;
+		for (int x = 0; x < width; x++, src += 4)
+		{
+			data.push_back(src[2]);
+			data.push_back(src[1]);
+			data.push_back(src[0]);
+		}
+	}
+	rc = SUCCEEDED(offscreenSurface->UnlockRect());
+	device->SetRenderTarget(0, backbuffer);
+
+	return true;
 }
 
 Renderer* rend_DirectX9()

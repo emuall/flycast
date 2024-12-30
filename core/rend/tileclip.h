@@ -54,11 +54,19 @@ static inline TileClipping GetTileClip(u32 val, const glm::mat4& viewport, int *
 	csy = csy * 32;
 	cey = (cey + 1) * 32;
 
-	if (csx <= 0 && csy <= 0 && cex >= 640 && cey >= 480 && tileClippingMode == TileClipping::Outside)
+	if (csx == 0 && csy == 0 && cex >= 640 && cey >= 480)
 		return TileClipping::Off;
 
 	if (!pvrrc.isRTT)
 	{
+		if (tileClippingMode == TileClipping::Outside && !config::EmulateFramebuffer)
+		{
+			// Intersect with framebuffer clipping
+			csx = std::max<float>(csx, pvrrc.fb_X_CLIP.min);
+			csy = std::max<float>(csy, pvrrc.fb_Y_CLIP.min);
+			cex = std::min<float>(cex, pvrrc.fb_X_CLIP.max + 1);
+			cey = std::min<float>(cey, pvrrc.fb_Y_CLIP.max + 1);
+		}
 		glm::vec4 clip_start(csx, csy, 0, 1);
 		glm::vec4 clip_end(cex, cey, 0, 1);
 		clip_start = viewport * clip_start;

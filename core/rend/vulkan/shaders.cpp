@@ -30,8 +30,8 @@ layout (std140, set = 0, binding = 0) uniform VertexShaderUniforms
 } uniformBuffer;
 
 layout (location = 0) in vec4         in_pos;
-layout (location = 1) in uvec4        in_base;
-layout (location = 2) in uvec4        in_offs;
+layout (location = 1) in vec4        in_base;
+layout (location = 2) in vec4        in_offs;
 layout (location = 3) in mediump vec2 in_uv;
 
 layout (location = 0) INTERPOLATION out highp vec4 vtx_base;
@@ -45,8 +45,8 @@ void main()
 	vpos /= vpos.z;
 	vpos.z = vpos.w;
 #endif
-	vtx_base = vec4(in_base) / 255.0;
-	vtx_offs = vec4(in_offs) / 255.0;
+	vtx_base = in_base;
+	vtx_offs = in_offs;
 	vtx_uv = vec3(in_uv, vpos.z);
 #if pp_Gouraud == 1 && DIV_POS_Z != 1
 	vtx_base *= vpos.z;
@@ -394,33 +394,6 @@ void main()
 }
 )";
 
-static const char OSDVertexShaderSource[] = R"(
-layout (location = 0) in vec4 inPos;
-layout (location = 1) in uvec4 inColor;
-layout (location = 2) in vec2 inUV;
-layout (location = 0) out lowp vec4 outColor;
-layout (location = 1) out mediump vec2 outUV;
-
-void main() 
-{
-	outColor = inColor / 255.0;
-	outUV = inUV;
-	gl_Position = inPos;
-}
-)";
-
-static const char OSDFragmentShaderSource[] = R"(
-layout (binding = 0) uniform sampler2D tex;
-layout (location = 0) in lowp vec4 inColor;
-layout (location = 1) in mediump vec2 inUV;
-layout (location = 0) out vec4 FragColor;
-
-void main() 
-{
-	FragColor = inColor * texture(tex, inUV);
-}
-)";
-
 extern const char N2LightShaderSource[] = R"(
 
 layout (std140, set = 1, binding = 2) uniform N2VertexShaderUniforms
@@ -659,8 +632,8 @@ layout (std140, set = 0, binding = 0) uniform VertexShaderUniforms
 } uniformBuffer;
 
 layout (location = 0) in vec4         in_pos;
-layout (location = 1) in uvec4        in_base;
-layout (location = 2) in uvec4        in_offs;
+layout (location = 1) in vec4         in_base;
+layout (location = 2) in vec4         in_offs;
 layout (location = 3) in mediump vec2 in_uv;
 layout (location = 4) in vec3         in_normal;
 
@@ -684,8 +657,8 @@ void wDivide(inout vec4 vpos)
 void main()
 {
 	vec4 vpos = n2Uniform.mvMat * in_pos;
-	vtx_base = vec4(in_base) / 255.0;
-	vtx_offs = vec4(in_offs) / 255.0;
+	vtx_base = in_base;
+	vtx_offs = in_offs;
 
 	vec3 vnorm = normalize(mat3(n2Uniform.normalMat) * in_normal);
 
@@ -743,6 +716,7 @@ void wDivide(inout vec4 vpos)
 void main()
 {
 	vec4 vpos = n2Uniform.mvMat * in_pos;
+	vpos.z = min(vpos.z, -0.001);
 	vpos = n2Uniform.projMat * vpos;
 	wDivide(vpos);
 
@@ -823,14 +797,4 @@ vk::UniqueShaderModule ShaderManager::compileQuadFragmentShader(bool ignoreTexAl
 	src.addConstant("IGNORE_TEX_ALPHA", (int)ignoreTexAlpha)
 			.addSource(QuadFragmentShaderSource);
 	return ShaderCompiler::Compile(vk::ShaderStageFlagBits::eFragment,src.generate());
-}
-
-vk::UniqueShaderModule ShaderManager::compileOSDVertexShader()
-{
-	return ShaderCompiler::Compile(vk::ShaderStageFlagBits::eVertex, VulkanSource().addSource(OSDVertexShaderSource).generate());
-}
-
-vk::UniqueShaderModule ShaderManager::compileOSDFragmentShader()
-{
-	return ShaderCompiler::Compile(vk::ShaderStageFlagBits::eFragment, VulkanSource().addSource(OSDFragmentShaderSource).generate());
 }

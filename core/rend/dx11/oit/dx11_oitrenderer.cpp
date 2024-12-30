@@ -179,7 +179,7 @@ struct DX11OITRenderer : public DX11Renderer
 			constants.trilinearAlpha = 1.f;
 
 		int clip_rect[4] = {};
-		TileClipping clipmode = GetTileClip(gp->tileclip, matrices.GetViewportMatrix(), clip_rect);
+		TileClipping clipmode = setTileClip(gp->tileclip, clip_rect);
 		int gpuPalette = gp->texture == nullptr || !gp->texture->gpuPalette ? 0
 				: gp->tsp.FilterMode + 1;
 		if (gpuPalette != 0)
@@ -248,21 +248,12 @@ struct DX11OITRenderer : public DX11Renderer
 				constants.paletteIndex = (float)((gp->tcw.PalSelect >> 4) << 8);
 		}
 
-		if (clipmode == TileClipping::Outside)
+		if (clipmode == TileClipping::Inside)
 		{
-			RECT rect { clip_rect[0], clip_rect[1], clip_rect[0] + clip_rect[2], clip_rect[1] + clip_rect[3] };
-			deviceContext->RSSetScissorRects(1, &rect);
-		}
-		else
-		{
-			deviceContext->RSSetScissorRects(1, &scissorRect);
-			if (clipmode == TileClipping::Inside)
-			{
-				constants.clipTest[0] = (float)clip_rect[0];
-				constants.clipTest[1] = (float)clip_rect[1];
-				constants.clipTest[2] = (float)(clip_rect[0] + clip_rect[2]);
-				constants.clipTest[3] = (float)(clip_rect[1] + clip_rect[3]);
-			}
+			constants.clipTest[0] = (float)clip_rect[0];
+			constants.clipTest[1] = (float)clip_rect[1];
+			constants.clipTest[2] = (float)(clip_rect[0] + clip_rect[2]);
+			constants.clipTest[3] = (float)(clip_rect[1] + clip_rect[3]);
 		}
 		constants.blend_mode0[0] = gp->tsp.SrcInstr;
 		constants.blend_mode0[1] = gp->tsp.DstInstr;
@@ -649,6 +640,7 @@ struct DX11OITRenderer : public DX11Renderer
 
 	bool Render() override
 	{
+		resetContextState();
 		bool is_rtt = pvrrc.isRTT;
 
 		if (!is_rtt)
@@ -692,7 +684,7 @@ struct DX11OITRenderer : public DX11Renderer
 #ifndef LIBRETRO
 			deviceContext->OMSetRenderTargets(1, &theDX11Context.getRenderTarget().get(), nullptr);
 			displayFramebuffer();
-			DrawOSD(false);
+			drawOSD();
 			renderVideoRouting();
 			theDX11Context.setFrameRendered();
 #else
@@ -702,6 +694,7 @@ struct DX11OITRenderer : public DX11Renderer
 #endif
 			frameRendered = true;
 			frameRenderedOnce = true;
+			clearLastFrame = false;
 		}
 
 		return !is_rtt;
